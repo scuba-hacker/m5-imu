@@ -1,6 +1,6 @@
 #include "M5StickCPlus.h"
 
-const bool showCube = false;
+const bool showCube = true;
 
 typedef struct {
     double x;
@@ -48,12 +48,24 @@ static constexpr double CUBE_AXIS_LENGTH = CUBE_SCALE * 2.0;
 static constexpr int16_t PLOT_CENTER_X = DISPLAY_WIDTH / 2;
 static constexpr int16_t PLOT_CENTER_Y = 180;
 static constexpr int16_t PLOT_RADIUS = 55;
+static constexpr int16_t ELLIPSE_TOP_OFFSET = 10;
+static constexpr int16_t ELLIPSE_PLOT_CENTER_Y =
+    ELLIPSE_TOP_OFFSET + ((DISPLAY_HEIGHT - ELLIPSE_TOP_OFFSET) / 2);
+static constexpr int16_t ELLIPSE_PLOT_RADIUS_X = DISPLAY_WIDTH / 2;
+static constexpr int16_t ELLIPSE_PLOT_RADIUS_Y =
+    (DISPLAY_HEIGHT - ELLIPSE_TOP_OFFSET) / 2;
 static constexpr int16_t SPOT_RADIUS = 10;
 static constexpr int16_t LEVEL_SPOT_RADIUS = 20;
 static constexpr int16_t PLOT_LINE_WIDTH = 3;
-static constexpr int16_t ATTITUDE_LABEL_Y = PLOT_CENTER_Y - PLOT_RADIUS - 19;
+static constexpr int16_t PITCH_LABEL_X = 20;
+static constexpr int16_t ROLL_LABEL_X = 115;
+static constexpr int16_t ATTITUDE_LABEL_Y = 5;
 static constexpr int16_t SPOT_LIMIT_LABEL_Y_OFFSET = 8;
+static constexpr int16_t FORWARD_ARROW_LENGTH = 30;
+static constexpr int16_t FORWARD_ARROW_HALF_WIDTH = 8;
+static constexpr int16_t FORWARD_ARROW_FLUTE_DEPTH = 4;
 static constexpr bool PLOT_BACKGROUND_BLACK = false;
+static constexpr uint16_t DISPLAY_BACKGROUND_COLOR = TFT_NAVY;
 static constexpr uint16_t TFT_DARK_GREEN_70 = 0x0260;
 static constexpr uint16_t TFT_DARK_YELLOW_70 = 0x4A60;
 static constexpr uint16_t TFT_DARK_RED_70 = 0x4800;
@@ -68,6 +80,8 @@ static constexpr uint32_t ALARM_SPOT_FLASH_TICK_MS = 150;
 static constexpr uint32_t REFERENCE_RESET_HOLD_MS = 100;
 static constexpr uint16_t REFERENCE_RESET_BEEP_FREQUENCY = 500;
 static constexpr uint32_t REFERENCE_RESET_BEEP_MS = 1000;
+static constexpr uint32_t GEOMETRY_TOGGLE_HOLD_MS = 1000;
+static constexpr uint32_t BUTTON_RELEASE_ARM_MS = 20;
 static constexpr uint32_t LIMIT_CYCLE_HOLD_MS = 100;
 static constexpr uint16_t LIMIT_CYCLE_BEEP_FREQUENCY = 3000;
 static constexpr uint32_t LIMIT_CYCLE_BEEP_MS = 100;
@@ -98,6 +112,14 @@ enum class HeadsUpAlertState {
     Level,
     Warning,
     Alarm,
+};
+
+struct HeadsUpPlotGeometry {
+    int16_t center_x;
+    int16_t center_y;
+    int16_t radius_x;
+    int16_t radius_y;
+    bool ellipse;
 };
 
 bool FeedbackBeepActive = false;
@@ -323,6 +345,15 @@ void drawThickCircle(TFT_eSprite *display, int16_t x, int16_t y,
     }
 }
 
+void drawThickEllipse(TFT_eSprite *display, int16_t x, int16_t y,
+                      int16_t radius_x, int16_t radius_y, uint32_t color) {
+    int16_t half_width = PLOT_LINE_WIDTH / 2;
+    for (int16_t offset = -half_width; offset <= half_width; offset++) {
+        display->drawEllipse(x, y, radius_x + offset, radius_y + offset,
+                             color);
+    }
+}
+
 void drawThickHorizontalLine(TFT_eSprite *display, int16_t x0, int16_t x1,
                              int16_t y, uint32_t color) {
     int16_t half_width = PLOT_LINE_WIDTH / 2;
@@ -339,15 +370,33 @@ void drawThickVerticalLine(TFT_eSprite *display, int16_t x, int16_t y0,
     }
 }
 
+HeadsUpPlotGeometry headsUpPlotGeometry(bool ellipse_mode) {
+    if (ellipse_mode) {
+        return {.center_x = PLOT_CENTER_X,
+                .center_y = ELLIPSE_PLOT_CENTER_Y,
+                .radius_x = ELLIPSE_PLOT_RADIUS_X,
+                .radius_y = ELLIPSE_PLOT_RADIUS_Y,
+                .ellipse = true};
+    }
+
+    return {.center_x = PLOT_CENTER_X,
+            .center_y = PLOT_CENTER_Y,
+            .radius_x = PLOT_RADIUS,
+            .radius_y = PLOT_RADIUS,
+            .ellipse = false};
+}
+
 void drawHeadsUpAttitudeLabel(TFT_eSprite *display, double pitch_degrees,
                               double roll_degrees) {
-    char attitude_text[16];
-    snprintf(attitude_text, sizeof(attitude_text), "%.0f %.0f", pitch_degrees,
-             roll_degrees);
+    char pitch_text[8];
+    char roll_text[8];
+    snprintf(pitch_text, sizeof(pitch_text), "%.0f", pitch_degrees);
+    snprintf(roll_text, sizeof(roll_text), "%.0f", roll_degrees);
     display->setTextSize(2);
-    display->setTextColor(TFT_WHITE);
-    display->drawCentreString(attitude_text, PLOT_CENTER_X, ATTITUDE_LABEL_Y,
-                              1);
+    display->setTextColor(TFT_GREENYELLOW);
+    display->drawCentreString(pitch_text, PITCH_LABEL_X, ATTITUDE_LABEL_Y, 1);
+    display->setTextColor(TFT_MAGENTA);
+    display->drawCentreString(roll_text, ROLL_LABEL_X, ATTITUDE_LABEL_Y, 1);
     display->setTextSize(1);
 }
 
@@ -392,12 +441,56 @@ uint32_t plotBackgroundColorForSpot(uint32_t spot_color) {
     if (spot_color == TFT_ORANGE) {
         return TFT_DARK_ORANGE_70;
     }
-    return TFT_BLACK;
+    return DISPLAY_BACKGROUND_COLOR;
+}
+
+void drawHeadsUpPlotBackground(TFT_eSprite *display,
+                               HeadsUpPlotGeometry *geometry,
+                               uint32_t spot_color) {
+    uint32_t background_color = plotBackgroundColorForSpot(spot_color);
+    if (geometry->ellipse) {
+        display->fillEllipse(geometry->center_x, geometry->center_y,
+                             geometry->radius_x, geometry->radius_y,
+                             background_color);
+    } else {
+        display->fillCircle(geometry->center_x, geometry->center_y,
+                            geometry->radius_x, background_color);
+    }
+}
+
+void drawHeadsUpPlotBoundary(TFT_eSprite *display,
+                             HeadsUpPlotGeometry *geometry, uint32_t color) {
+    if (geometry->ellipse) {
+        drawThickEllipse(display, geometry->center_x, geometry->center_y,
+                         geometry->radius_x, geometry->radius_y, color);
+    } else {
+        drawThickCircle(display, geometry->center_x, geometry->center_y,
+                        geometry->radius_x, color);
+    }
+}
+
+void drawHeadsUpForwardArrow(TFT_eSprite *display,
+                             HeadsUpPlotGeometry *geometry,
+                             uint32_t color, uint32_t background_color) {
+    int16_t arrow_tip_y = geometry->center_y - geometry->radius_y;
+    int16_t arrow_base_y = arrow_tip_y + FORWARD_ARROW_LENGTH;
+    display->fillTriangle(geometry->center_x, arrow_tip_y,
+                          geometry->center_x - FORWARD_ARROW_HALF_WIDTH,
+                          arrow_base_y,
+                          geometry->center_x + FORWARD_ARROW_HALF_WIDTH,
+                          arrow_base_y, color);
+    display->fillTriangle(geometry->center_x,
+                          arrow_base_y - FORWARD_ARROW_FLUTE_DEPTH,
+                          geometry->center_x - FORWARD_ARROW_HALF_WIDTH,
+                          arrow_base_y,
+                          geometry->center_x + FORWARD_ARROW_HALF_WIDTH,
+                          arrow_base_y, background_color);
 }
 
 HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
-                                  double roll_degrees) {
+                                  double roll_degrees, bool ellipse_mode) {
     HeadsUpLimitConfig *limits = currentHeadsUpLimits();
+    HeadsUpPlotGeometry geometry = headsUpPlotGeometry(ellipse_mode);
 
     double plot_x =
         clampDouble(roll_degrees / limits->plot_limit_degrees, -1.0, 1.0);
@@ -421,25 +514,26 @@ HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
         spot_color = TFT_RED;
     }
 
-    int16_t spot_limit = PLOT_RADIUS;
-    int16_t spot_x = PLOT_CENTER_X + (int16_t)(plot_x * spot_limit);
-    int16_t spot_y = PLOT_CENTER_Y + (int16_t)(plot_y * spot_limit);
+    int16_t spot_x = geometry.center_x + (int16_t)(plot_x * geometry.radius_x);
+    int16_t spot_y = geometry.center_y + (int16_t)(plot_y * geometry.radius_y);
 
     if (alert_state == HeadsUpAlertState::Alarm) {
         uint32_t flash_phase = (millis() / ALARM_SPOT_FLASH_TICK_MS) % 3;
         spot_color = flash_phase == 0 ? TFT_ORANGE : TFT_RED;
     }
 
-    drawHeadsUpAttitudeLabel(display, pitch_degrees, roll_degrees);
-    display->fillCircle(PLOT_CENTER_X, PLOT_CENTER_Y, PLOT_RADIUS,
-                        plotBackgroundColorForSpot(spot_color));
-    drawThickCircle(display, PLOT_CENTER_X, PLOT_CENTER_Y, PLOT_RADIUS,
-                    TFT_WHITE);
-    drawThickHorizontalLine(display, PLOT_CENTER_X - PLOT_RADIUS,
-                            PLOT_CENTER_X + PLOT_RADIUS, PLOT_CENTER_Y,
-                            spot_color);
-    drawThickVerticalLine(display, PLOT_CENTER_X, PLOT_CENTER_Y - PLOT_RADIUS,
-                          PLOT_CENTER_Y + PLOT_RADIUS, spot_color);
+    uint32_t plot_background_color = plotBackgroundColorForSpot(spot_color);
+    drawHeadsUpPlotBackground(display, &geometry, spot_color);
+    drawHeadsUpPlotBoundary(display, &geometry, spot_color);
+    drawThickHorizontalLine(display, geometry.center_x - geometry.radius_x,
+                            geometry.center_x + geometry.radius_x,
+                            geometry.center_y, spot_color);
+    drawThickVerticalLine(display, geometry.center_x,
+                          geometry.center_y - geometry.radius_y +
+                              FORWARD_ARROW_LENGTH,
+                          geometry.center_y + geometry.radius_y, spot_color);
+    drawHeadsUpForwardArrow(display, &geometry, spot_color,
+                            plot_background_color);
 
     display->fillCircle(spot_x, spot_y, spot_radius, spot_color);
     if (alert_state == HeadsUpAlertState::Level) {
@@ -448,6 +542,7 @@ HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
                spot_color == TFT_RED) {
         drawHeadsUpWarningSpotLimitLabel(display, spot_x, spot_y, limits);
     }
+    drawHeadsUpAttitudeLabel(display, pitch_degrees, roll_degrees);
     return alert_state;
 }
 
@@ -645,7 +740,10 @@ void MPU6886Test_heads_up(bool show_cube) {
         prepareHeadsUpCube(rect_source);
     }
 
-    bool reference_reset_armed = true;
+    bool button_a_tracking = false;
+    bool geometry_toggle_handled = false;
+    uint32_t button_a_press_started_ms = 0;
+    bool ellipse_mode = false;
     bool limit_cycle_armed = true;
 
     while (true) {
@@ -656,18 +754,34 @@ void MPU6886Test_heads_up(bool show_cube) {
         theta = alpha * raw_theta + (1 - alpha) * last_theta;
         phi   = alpha * raw_phi + (1 - alpha) * last_phi;
 
-        if (M5.BtnA.isReleased()) {
-            reference_reset_armed = true;
-        } else if (reference_reset_armed &&
-                   M5.BtnA.pressedFor(REFERENCE_RESET_HOLD_MS)) {
-            theta_reference = theta;
-            phi_reference = phi;
-            reference_reset_armed = false;
-            startFeedbackBeep(REFERENCE_RESET_BEEP_FREQUENCY,
-                              REFERENCE_RESET_BEEP_MS);
+        if (M5.BtnA.wasPressed() ||
+            (!button_a_tracking && M5.BtnA.isPressed())) {
+            button_a_tracking = true;
+            geometry_toggle_handled = false;
+            button_a_press_started_ms = M5.BtnA.lastChange();
         }
 
-        if (M5.BtnB.isReleased()) {
+        if (button_a_tracking && !geometry_toggle_handled &&
+            M5.BtnA.pressedFor(GEOMETRY_TOGGLE_HOLD_MS)) {
+            ellipse_mode = !ellipse_mode;
+            geometry_toggle_handled = true;
+        }
+
+        if (button_a_tracking &&
+            M5.BtnA.releasedFor(BUTTON_RELEASE_ARM_MS)) {
+            uint32_t button_a_held_ms =
+                M5.BtnA.lastChange() - button_a_press_started_ms;
+            if (!geometry_toggle_handled &&
+                button_a_held_ms >= REFERENCE_RESET_HOLD_MS) {
+                theta_reference = theta;
+                phi_reference = phi;
+                startFeedbackBeep(REFERENCE_RESET_BEEP_FREQUENCY,
+                                  REFERENCE_RESET_BEEP_MS);
+            }
+            button_a_tracking = false;
+        }
+
+        if (M5.BtnB.releasedFor(BUTTON_RELEASE_ARM_MS)) {
             limit_cycle_armed = true;
         } else if (limit_cycle_armed &&
                    M5.BtnB.pressedFor(LIMIT_CYCLE_HOLD_MS)) {
@@ -679,13 +793,14 @@ void MPU6886Test_heads_up(bool show_cube) {
         double roll_delta = theta - theta_reference;
         double pitch_delta = phi - phi_reference;
 
-        Disbuff.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, TFT_BLACK);
+        Disbuff.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                         DISPLAY_BACKGROUND_COLOR);
 
         if (show_cube) {
             drawHeadsUpCube(&Disbuff, theta, phi, rect_source);
         }
         HeadsUpAlertState alert_state =
-            drawHeadsUpPlot(&Disbuff, pitch_delta, roll_delta);
+            drawHeadsUpPlot(&Disbuff, pitch_delta, roll_delta, ellipse_mode);
         updateHeadsUpAlerts(alert_state);
 
         Displaybuff();
@@ -753,7 +868,7 @@ void setup()
 
     Disbuff.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     Disbuff.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                     Disbuff.color565(10, 10, 10));
+                     DISPLAY_BACKGROUND_COLOR);
     Disbuff.pushSprite(0, 0);
 
     M5.Imu.Init();

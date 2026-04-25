@@ -64,6 +64,12 @@ static constexpr int16_t SPOT_LIMIT_LABEL_Y_OFFSET = 8;
 static constexpr int16_t FORWARD_ARROW_LENGTH = 30;
 static constexpr int16_t FORWARD_ARROW_HALF_WIDTH = 8;
 static constexpr int16_t FORWARD_ARROW_FLUTE_DEPTH = 4;
+static constexpr int16_t RED_SPOT_RETURN_ARROW_LENGTH = 28;
+static constexpr int16_t RED_SPOT_RETURN_ARROW_HEAD_LENGTH = 10;
+static constexpr int16_t RED_SPOT_RETURN_ARROW_HEAD_WIDTH = 14;
+static constexpr int16_t RED_SPOT_RETURN_ARROW_SHAFT_WIDTH = 6;
+static constexpr int16_t RED_SPOT_RETURN_ARROW_SPOT_OVERLAP = 6;
+static constexpr uint16_t RED_SPOT_RETURN_ARROW_COLOR = TFT_MAGENTA;
 static constexpr bool PLOT_BACKGROUND_BLACK = false;
 static constexpr uint16_t DISPLAY_BACKGROUND_COLOR = TFT_NAVY;
 static constexpr uint16_t TFT_DARK_GREEN_70 = 0x0260;
@@ -85,6 +91,13 @@ static constexpr uint32_t BUTTON_RELEASE_ARM_MS = 20;
 static constexpr uint32_t LIMIT_CYCLE_HOLD_MS = 100;
 static constexpr uint16_t LIMIT_CYCLE_BEEP_FREQUENCY = 3000;
 static constexpr uint32_t LIMIT_CYCLE_BEEP_MS = 100;
+static constexpr uint32_t SOUND_TOGGLE_HOLD_MS = 1000;
+static constexpr uint32_t SOUND_TOGGLE_TONE_MS = 100;
+static constexpr uint8_t SOUND_TOGGLE_TONE_COUNT = 3;
+static constexpr uint16_t SOUND_TOGGLE_ON_TONES[SOUND_TOGGLE_TONE_COUNT] = {
+    784, 1047, 1319};
+static constexpr uint16_t SOUND_TOGGLE_OFF_TONES[SOUND_TOGGLE_TONE_COUNT] = {
+    1319, 1047, 784};
 
 struct HeadsUpLimitConfig {
     double level_limit_degrees;
@@ -125,6 +138,11 @@ struct HeadsUpPlotGeometry {
 bool FeedbackBeepActive = false;
 uint32_t FeedbackBeepStartedMs = 0;
 uint32_t FeedbackBeepDurationMs = 0;
+bool SoundEnabled = true;
+bool SoundToggleTonesActive = false;
+const uint16_t *SoundToggleTones = NULL;
+uint8_t SoundToggleToneIndex = 0;
+uint32_t SoundToggleTonesStartedMs = 0;
 
 hw_timer_t *timer = NULL;
 volatile SemaphoreHandle_t timerSemaphore;
@@ -232,7 +250,46 @@ void cycleHeadsUpLimits() {
         (HeadsUpLimitStateIndex + 1) % headsUpLimitStateCount();
 }
 
+void startSoundToggleTones(bool sound_enabled) {
+    FeedbackBeepActive = false;
+    SoundToggleTonesActive = true;
+    SoundToggleTones = sound_enabled ? SOUND_TOGGLE_ON_TONES
+                                     : SOUND_TOGGLE_OFF_TONES;
+    SoundToggleToneIndex = 0;
+    SoundToggleTonesStartedMs = millis();
+    M5.Beep.tone(SoundToggleTones[SoundToggleToneIndex]);
+}
+
+void toggleSoundEnabled() {
+    SoundEnabled = !SoundEnabled;
+    startSoundToggleTones(SoundEnabled);
+}
+
+bool updateSoundToggleTones(uint32_t now) {
+    if (!SoundToggleTonesActive) {
+        return false;
+    }
+
+    uint32_t elapsed_ms = now - SoundToggleTonesStartedMs;
+    uint8_t tone_index = elapsed_ms / SOUND_TOGGLE_TONE_MS;
+    if (tone_index >= SOUND_TOGGLE_TONE_COUNT) {
+        SoundToggleTonesActive = false;
+        M5.Beep.mute();
+        return false;
+    }
+
+    if (tone_index != SoundToggleToneIndex) {
+        SoundToggleToneIndex = tone_index;
+        M5.Beep.tone(SoundToggleTones[SoundToggleToneIndex]);
+    }
+    return true;
+}
+
 void startFeedbackBeep(uint16_t frequency, uint32_t duration_ms) {
+    if (!SoundEnabled || SoundToggleTonesActive) {
+        return;
+    }
+
     FeedbackBeepActive = true;
     FeedbackBeepStartedMs = millis();
     FeedbackBeepDurationMs = duration_ms;
@@ -241,6 +298,12 @@ void startFeedbackBeep(uint16_t frequency, uint32_t duration_ms) {
 
 bool updateFeedbackBeep(uint32_t now) {
     if (!FeedbackBeepActive) {
+        return false;
+    }
+
+    if (!SoundEnabled) {
+        FeedbackBeepActive = false;
+        M5.Beep.mute();
         return false;
     }
 
@@ -301,12 +364,18 @@ void updateHeadsUpAlerts(HeadsUpAlertState alert_state) {
     static bool level_pulse_active = false;
     uint32_t now = millis();
     bool alert_phase_on = ((now / ALERT_TOGGLE_MS) % 2) == 0;
-    bool feedback_beep_active = updateFeedbackBeep(now);
+    bool sound_toggle_tones_active = updateSoundToggleTones(now);
+    bool feedback_beep_active =
+        sound_toggle_tones_active ? false : updateFeedbackBeep(now);
 
     if (alert_state == HeadsUpAlertState::Alarm) {
         level_pulse_active = false;
         setRedLed(true);
-        if (feedback_beep_active) {
+        if (sound_toggle_tones_active || feedback_beep_active) {
+            return;
+        }
+        if (!SoundEnabled) {
+            M5.Beep.mute();
             return;
         }
         if (alert_phase_on) {
@@ -317,11 +386,11 @@ void updateHeadsUpAlerts(HeadsUpAlertState alert_state) {
     } else if (alert_state == HeadsUpAlertState::Warning) {
         level_pulse_active = false;
         setRedLed(alert_phase_on);
-        if (!feedback_beep_active) {
+        if (!sound_toggle_tones_active && !feedback_beep_active) {
             M5.Beep.mute();
         }
     } else {
-        if (!feedback_beep_active) {
+        if (!sound_toggle_tones_active && !feedback_beep_active) {
             M5.Beep.mute();
         }
         if (level_pulse_active &&
@@ -487,6 +556,82 @@ void drawHeadsUpForwardArrow(TFT_eSprite *display,
                           arrow_base_y, background_color);
 }
 
+int16_t roundDoubleToInt16(double value) {
+    return (int16_t)(value >= 0 ? value + 0.5 : value - 0.5);
+}
+
+void fillTriangleRounded(TFT_eSprite *display, double x0, double y0, double x1,
+                         double y1, double x2, double y2, uint32_t color) {
+    display->fillTriangle(roundDoubleToInt16(x0), roundDoubleToInt16(y0),
+                          roundDoubleToInt16(x1), roundDoubleToInt16(y1),
+                          roundDoubleToInt16(x2), roundDoubleToInt16(y2),
+                          color);
+}
+
+void drawRedSpotReturnArrow(TFT_eSprite *display,
+                            HeadsUpPlotGeometry *geometry, int16_t spot_x,
+                            int16_t spot_y, int16_t spot_radius) {
+    double direction_x = geometry->center_x - spot_x;
+    double direction_y = geometry->center_y - spot_y;
+    double direction_length =
+        sqrt((direction_x * direction_x) + (direction_y * direction_y));
+    if (direction_length <= 0.0) {
+        return;
+    }
+
+    direction_x /= direction_length;
+    direction_y /= direction_length;
+
+    double arrow_length = RED_SPOT_RETURN_ARROW_LENGTH;
+    double max_arrow_length = direction_length - spot_radius;
+    if (arrow_length > max_arrow_length) {
+        arrow_length = max_arrow_length;
+    }
+    if (arrow_length <= 0.0) {
+        return;
+    }
+
+    double perpendicular_x = -direction_y;
+    double perpendicular_y = direction_x;
+    double tail_x =
+        spot_x + direction_x * (spot_radius - RED_SPOT_RETURN_ARROW_SPOT_OVERLAP);
+    double tail_y =
+        spot_y + direction_y * (spot_radius - RED_SPOT_RETURN_ARROW_SPOT_OVERLAP);
+    double tip_x = spot_x + direction_x * (spot_radius + arrow_length);
+    double tip_y = spot_y + direction_y * (spot_radius + arrow_length);
+    double head_length = RED_SPOT_RETURN_ARROW_HEAD_LENGTH;
+    if (head_length > arrow_length) {
+        head_length = arrow_length;
+    }
+    double head_base_x = tip_x - direction_x * head_length;
+    double head_base_y = tip_y - direction_y * head_length;
+    double shaft_half_width = RED_SPOT_RETURN_ARROW_SHAFT_WIDTH / 2.0;
+    double head_half_width = RED_SPOT_RETURN_ARROW_HEAD_WIDTH / 2.0;
+
+    double tail_left_x = tail_x + perpendicular_x * shaft_half_width;
+    double tail_left_y = tail_y + perpendicular_y * shaft_half_width;
+    double tail_right_x = tail_x - perpendicular_x * shaft_half_width;
+    double tail_right_y = tail_y - perpendicular_y * shaft_half_width;
+    double shaft_left_x = head_base_x + perpendicular_x * shaft_half_width;
+    double shaft_left_y = head_base_y + perpendicular_y * shaft_half_width;
+    double shaft_right_x = head_base_x - perpendicular_x * shaft_half_width;
+    double shaft_right_y = head_base_y - perpendicular_y * shaft_half_width;
+    double head_left_x = head_base_x + perpendicular_x * head_half_width;
+    double head_left_y = head_base_y + perpendicular_y * head_half_width;
+    double head_right_x = head_base_x - perpendicular_x * head_half_width;
+    double head_right_y = head_base_y - perpendicular_y * head_half_width;
+
+    fillTriangleRounded(display, tail_left_x, tail_left_y, shaft_left_x,
+                        shaft_left_y, shaft_right_x, shaft_right_y,
+                        RED_SPOT_RETURN_ARROW_COLOR);
+    fillTriangleRounded(display, tail_left_x, tail_left_y, shaft_right_x,
+                        shaft_right_y, tail_right_x, tail_right_y,
+                        RED_SPOT_RETURN_ARROW_COLOR);
+    fillTriangleRounded(display, tip_x, tip_y, head_left_x, head_left_y,
+                        head_right_x, head_right_y,
+                        RED_SPOT_RETURN_ARROW_COLOR);
+}
+
 HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
                                   double roll_degrees, bool ellipse_mode) {
     HeadsUpLimitConfig *limits = currentHeadsUpLimits();
@@ -535,6 +680,10 @@ HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
     drawHeadsUpForwardArrow(display, &geometry, spot_color,
                             plot_background_color);
 
+    if (alert_state == HeadsUpAlertState::Alarm && spot_color == TFT_RED) {
+        drawRedSpotReturnArrow(display, &geometry, spot_x, spot_y,
+                               spot_radius);
+    }
     display->fillCircle(spot_x, spot_y, spot_radius, spot_color);
     if (alert_state == HeadsUpAlertState::Level) {
         drawHeadsUpSpotLimitLabel(display, spot_x, spot_y, limits);
@@ -718,7 +867,9 @@ void MPU6886Test() {
     while ((M5.BtnA.isPressed()) || (M5.BtnB.isPressed())) {
         M5.update();
         checkAXPPress();
-        M5.Beep.tone(4000);
+        if (SoundEnabled) {
+            M5.Beep.tone(4000);
+        }
     }
     M5.Beep.mute();
     Disbuff.setTextColor(TFT_WHITE);
@@ -744,7 +895,9 @@ void MPU6886Test_heads_up(bool show_cube) {
     bool geometry_toggle_handled = false;
     uint32_t button_a_press_started_ms = 0;
     bool ellipse_mode = false;
-    bool limit_cycle_armed = true;
+    bool button_b_tracking = false;
+    bool sound_toggle_handled = false;
+    uint32_t button_b_press_started_ms = 0;
 
     while (true) {
         double raw_theta = 0;
@@ -781,13 +934,30 @@ void MPU6886Test_heads_up(bool show_cube) {
             button_a_tracking = false;
         }
 
-        if (M5.BtnB.releasedFor(BUTTON_RELEASE_ARM_MS)) {
-            limit_cycle_armed = true;
-        } else if (limit_cycle_armed &&
-                   M5.BtnB.pressedFor(LIMIT_CYCLE_HOLD_MS)) {
-            cycleHeadsUpLimits();
-            limit_cycle_armed = false;
-            startFeedbackBeep(LIMIT_CYCLE_BEEP_FREQUENCY, LIMIT_CYCLE_BEEP_MS);
+        if (M5.BtnB.wasPressed() ||
+            (!button_b_tracking && M5.BtnB.isPressed())) {
+            button_b_tracking = true;
+            sound_toggle_handled = false;
+            button_b_press_started_ms = M5.BtnB.lastChange();
+        }
+
+        if (button_b_tracking && !sound_toggle_handled &&
+            M5.BtnB.pressedFor(SOUND_TOGGLE_HOLD_MS)) {
+            toggleSoundEnabled();
+            sound_toggle_handled = true;
+        }
+
+        if (button_b_tracking &&
+            M5.BtnB.releasedFor(BUTTON_RELEASE_ARM_MS)) {
+            uint32_t button_b_held_ms =
+                M5.BtnB.lastChange() - button_b_press_started_ms;
+            if (!sound_toggle_handled &&
+                button_b_held_ms >= LIMIT_CYCLE_HOLD_MS) {
+                cycleHeadsUpLimits();
+                startFeedbackBeep(LIMIT_CYCLE_BEEP_FREQUENCY,
+                                  LIMIT_CYCLE_BEEP_MS);
+            }
+            button_b_tracking = false;
         }
 
         double roll_delta = theta - theta_reference;

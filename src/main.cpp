@@ -70,6 +70,7 @@ static constexpr int16_t RED_SPOT_RETURN_ARROW_HEAD_WIDTH = 14;
 static constexpr int16_t RED_SPOT_RETURN_ARROW_SHAFT_WIDTH = 6;
 static constexpr int16_t RED_SPOT_RETURN_ARROW_SPOT_OVERLAP = 6;
 static constexpr uint16_t RED_SPOT_RETURN_ARROW_COLOR = TFT_MAGENTA;
+static constexpr int16_t HOLLOW_SPOT_RING_WIDTH = 4;
 static constexpr bool PLOT_BACKGROUND_BLACK = false;
 static constexpr uint16_t DISPLAY_BACKGROUND_COLOR = TFT_NAVY;
 static constexpr uint16_t TFT_DARK_GREEN_70 = 0x0260;
@@ -98,6 +99,7 @@ static constexpr uint16_t SOUND_TOGGLE_ON_TONES[SOUND_TOGGLE_TONE_COUNT] = {
     784, 1047, 1319};
 static constexpr uint16_t SOUND_TOGGLE_OFF_TONES[SOUND_TOGGLE_TONE_COUNT] = {
     1319, 1047, 784};
+static constexpr double INVERSION_DOT_THRESHOLD = 0.0;
 
 struct HeadsUpLimitConfig {
     double level_limit_degrees;
@@ -133,6 +135,12 @@ struct HeadsUpPlotGeometry {
     int16_t radius_x;
     int16_t radius_y;
     bool ellipse;
+};
+
+struct AccelVector {
+    double x;
+    double y;
+    double z;
 };
 
 bool FeedbackBeepActive = false;
@@ -326,12 +334,17 @@ double clampDouble(double value, double min_value, double max_value) {
     return value;
 }
 
-void readTiltDegrees(double *theta, double *phi) {
+void readTiltSample(double *theta, double *phi, AccelVector *accel) {
     float accX = 0;
     float accY = 0;
     float accZ = 0;
 
     M5.Imu.getAccelData(&accX, &accY, &accZ);
+    if (accel != NULL) {
+        accel->x = accX;
+        accel->y = accY;
+        accel->z = accZ;
+    }
 
     *theta = asin(clampDouble(-accX, -1.0, 1.0)) * DEGREES_PER_RADIAN;
     if (accZ != 0) {
@@ -341,9 +354,33 @@ void readTiltDegrees(double *theta, double *phi) {
     }
 }
 
+void readTiltDegrees(double *theta, double *phi) {
+    readTiltSample(theta, phi, NULL);
+}
+
+double accelDotProduct(AccelVector *a, AccelVector *b) {
+    double a_length = sqrt((a->x * a->x) + (a->y * a->y) + (a->z * a->z));
+    double b_length = sqrt((b->x * b->x) + (b->y * b->y) + (b->z * b->z));
+    if (a_length <= 0.0 || b_length <= 0.0) {
+        return 1.0;
+    }
+
+    return ((a->x * b->x) + (a->y * b->y) + (a->z * b->z)) /
+           (a_length * b_length);
+}
+
+bool isInvertedFromReference(AccelVector *current, AccelVector *reference) {
+    return accelDotProduct(current, reference) < INVERSION_DOT_THRESHOLD;
+}
+
 HeadsUpAlertState getHeadsUpAlertState(double pitch_degrees,
                                        double roll_degrees,
-                                       HeadsUpLimitConfig *limits) {
+                                       HeadsUpLimitConfig *limits,
+                                       bool inverted) {
+    if (inverted) {
+        return HeadsUpAlertState::Alarm;
+    }
+
     double pitch_deflection = fabs(pitch_degrees);
     double roll_deflection = fabs(roll_degrees);
     double axis_deflection =
@@ -570,12 +607,21 @@ void fillTriangleRounded(TFT_eSprite *display, double x0, double y0, double x1,
 
 void drawRedSpotReturnArrow(TFT_eSprite *display,
                             HeadsUpPlotGeometry *geometry, int16_t spot_x,
-                            int16_t spot_y, int16_t spot_radius) {
-    double direction_x = geometry->center_x - spot_x;
-    double direction_y = geometry->center_y - spot_y;
+                            int16_t spot_y, int16_t spot_radius,
+                            bool point_away_from_origin) {
+    double direction_x = point_away_from_origin
+                             ? spot_x - geometry->center_x
+                             : geometry->center_x - spot_x;
+    double direction_y = point_away_from_origin
+                             ? spot_y - geometry->center_y
+                             : geometry->center_y - spot_y;
     double direction_length =
         sqrt((direction_x * direction_x) + (direction_y * direction_y));
-    if (direction_length <= 0.0) {
+    if (direction_length <= 0.0 && point_away_from_origin) {
+        direction_x = 0.0;
+        direction_y = -1.0;
+        direction_length = 1.0;
+    } else if (direction_length <= 0.0) {
         return;
     }
 
@@ -583,9 +629,11 @@ void drawRedSpotReturnArrow(TFT_eSprite *display,
     direction_y /= direction_length;
 
     double arrow_length = RED_SPOT_RETURN_ARROW_LENGTH;
-    double max_arrow_length = direction_length - spot_radius;
-    if (arrow_length > max_arrow_length) {
-        arrow_length = max_arrow_length;
+    if (!point_away_from_origin) {
+        double max_arrow_length = direction_length - spot_radius;
+        if (arrow_length > max_arrow_length) {
+            arrow_length = max_arrow_length;
+        }
     }
     if (arrow_length <= 0.0) {
         return;
@@ -633,7 +681,8 @@ void drawRedSpotReturnArrow(TFT_eSprite *display,
 }
 
 HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
-                                  double roll_degrees, bool ellipse_mode) {
+                                  double roll_degrees, bool ellipse_mode,
+                                  bool inverted) {
     HeadsUpLimitConfig *limits = currentHeadsUpLimits();
     HeadsUpPlotGeometry geometry = headsUpPlotGeometry(ellipse_mode);
 
@@ -650,7 +699,7 @@ HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
     int16_t spot_radius = SPOT_RADIUS;
     uint32_t spot_color = TFT_YELLOW;
     HeadsUpAlertState alert_state =
-        getHeadsUpAlertState(pitch_degrees, roll_degrees, limits);
+        getHeadsUpAlertState(pitch_degrees, roll_degrees, limits, inverted);
     if (alert_state == HeadsUpAlertState::Level) {
         spot_radius = LEVEL_SPOT_RADIUS;
         spot_color = TFT_GREEN;
@@ -682,13 +731,18 @@ HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
 
     if (alert_state == HeadsUpAlertState::Alarm && spot_color == TFT_RED) {
         drawRedSpotReturnArrow(display, &geometry, spot_x, spot_y,
-                               spot_radius);
+                               spot_radius, inverted);
     }
+    bool hollow_spot = inverted && alert_state == HeadsUpAlertState::Alarm;
     display->fillCircle(spot_x, spot_y, spot_radius, spot_color);
+    if (hollow_spot) {
+        display->fillCircle(spot_x, spot_y,
+                            spot_radius - HOLLOW_SPOT_RING_WIDTH, TFT_BLACK);
+    }
     if (alert_state == HeadsUpAlertState::Level) {
         drawHeadsUpSpotLimitLabel(display, spot_x, spot_y, limits);
     } else if (alert_state == HeadsUpAlertState::Alarm &&
-               spot_color == TFT_RED) {
+               spot_color == TFT_RED && !hollow_spot) {
         drawHeadsUpWarningSpotLimitLabel(display, spot_x, spot_y, limits);
     }
     drawHeadsUpAttitudeLabel(display, pitch_degrees, roll_degrees);
@@ -881,8 +935,9 @@ void MPU6886Test_heads_up(bool show_cube) {
     double theta = 0, last_theta = 0;
     double phi = 0, last_phi = 0;
     double alpha = 0.2;
+    AccelVector reference_accel = {0, 0, 1};
 
-    readTiltDegrees(&theta_reference, &phi_reference);
+    readTiltSample(&theta_reference, &phi_reference, &reference_accel);
     theta = last_theta = theta_reference;
     phi = last_phi = phi_reference;
 
@@ -902,7 +957,8 @@ void MPU6886Test_heads_up(bool show_cube) {
     while (true) {
         double raw_theta = 0;
         double raw_phi = 0;
-        readTiltDegrees(&raw_theta, &raw_phi);
+        AccelVector current_accel = {0, 0, 1};
+        readTiltSample(&raw_theta, &raw_phi, &current_accel);
 
         theta = alpha * raw_theta + (1 - alpha) * last_theta;
         phi   = alpha * raw_phi + (1 - alpha) * last_phi;
@@ -928,6 +984,7 @@ void MPU6886Test_heads_up(bool show_cube) {
                 button_a_held_ms >= REFERENCE_RESET_HOLD_MS) {
                 theta_reference = theta;
                 phi_reference = phi;
+                reference_accel = current_accel;
                 startFeedbackBeep(REFERENCE_RESET_BEEP_FREQUENCY,
                                   REFERENCE_RESET_BEEP_MS);
             }
@@ -962,6 +1019,8 @@ void MPU6886Test_heads_up(bool show_cube) {
 
         double roll_delta = theta - theta_reference;
         double pitch_delta = phi - phi_reference;
+        bool inverted =
+            isInvertedFromReference(&current_accel, &reference_accel);
 
         Disbuff.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                          DISPLAY_BACKGROUND_COLOR);
@@ -970,7 +1029,8 @@ void MPU6886Test_heads_up(bool show_cube) {
             drawHeadsUpCube(&Disbuff, theta, phi, rect_source);
         }
         HeadsUpAlertState alert_state =
-            drawHeadsUpPlot(&Disbuff, pitch_delta, roll_delta, ellipse_mode);
+            drawHeadsUpPlot(&Disbuff, pitch_delta, roll_delta, ellipse_mode,
+                            inverted);
         updateHeadsUpAlerts(alert_state);
 
         Displaybuff();
@@ -1022,7 +1082,7 @@ int checkI2CAddr() {
 void setup() 
 {
     M5.begin();
-
+    M5.Axp.ScreenBreath(100);    
     Serial.begin(115200);
 
     Wire.begin(32, 33);

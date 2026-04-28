@@ -1,9 +1,64 @@
 #include "M5StickCPlus.h"
+#include <string.h>
 
 const bool showCube = true;
 static constexpr bool DEVICE_IS_SENSOR_NODE = false;
 static constexpr bool DEVICE_HAS_RADIO_LINK = true;
 
+struct CommsConfig
+{
+    uint32_t imu_link_baud;
+    uint32_t imu_link_send_interval_ms;
+    uint32_t imu_link_timeout_ms;
+};
+
+static constexpr CommsConfig comms_unthrottled_115200_air = {     // measured max 37 messages per second tx, limited by screen refresh.
+                    .imu_link_baud=115200, 
+                    .imu_link_send_interval_ms=0, 
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_unthrottled_9600_air = {     // measured max 37 messages per second tx, limited by screen refresh.
+                    .imu_link_baud=9600, 
+                    .imu_link_send_interval_ms=0, 
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_20_Hz_9600_air = {           // measure 19 messages per second tx
+                    .imu_link_baud=9600, 
+                    .imu_link_send_interval_ms=50,
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_unthrottled_4800_air = { // measured max 37 messages per second tx, limited by screen refresh.
+                    .imu_link_baud=4800, 
+                    .imu_link_send_interval_ms=0,
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_unthrottled_2400_air = { // measured max 30 messages per second tx
+                    .imu_link_baud=2400, 
+                    .imu_link_send_interval_ms=0,
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_20_Hz_2400_air = { // measured max 20 messages per second tx
+                    .imu_link_baud=2400, 
+                    .imu_link_send_interval_ms=50,
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_unthrottled_1200_water = { // max 15 messages per second tx
+                    .imu_link_baud=1200, 
+                    .imu_link_send_interval_ms=0,
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_12_Hz_1200_water = { // max 12 messages per second tx
+                    .imu_link_baud=1200, 
+                    .imu_link_send_interval_ms=83, 
+                    .imu_link_timeout_ms=250};
+
+static constexpr CommsConfig comms_10Hz_1200_water = { // max 10 messages per second tx
+                    .imu_link_baud=1200, 
+                    .imu_link_send_interval_ms=100, 
+                    .imu_link_timeout_ms=250};
+
+
+static constexpr CommsConfig active_comms_config = comms_12_Hz_1200_water;
 typedef struct {
     double x;
     double y;
@@ -55,8 +110,25 @@ static constexpr int16_t PITCH_LABEL_X = 20;
 static constexpr int16_t ROLL_LABEL_X = 115;
 static constexpr int16_t ATTITUDE_LABEL_Y = 5;
 
+static constexpr int16_t MESSAGE_RATE_X = 5;
+static constexpr int16_t MESSAGE_RATE_Y = 210;
+static constexpr uint16_t MESSAGE_RATE_COLOUR = TFT_WHITE;
+static constexpr bool MESSAGE_RATE_AS_PERCENT = false;
+static constexpr uint32_t MESSAGE_RATE_WINDOW_MS = 3000;
+static constexpr uint32_t MESSAGE_RATE_DISPLAY_UPDATE_MS = 250;
+static constexpr uint8_t MESSAGE_RATE_BUCKET_COUNT = 30;
+
 static constexpr int16_t DEVICE_MODE_X = 125;
 static constexpr int16_t DEVICE_MODE_Y = 210;
+static constexpr int16_t DEVICE_MODE_COLOUR = TFT_WHITE;
+
+static constexpr int16_t SENSOR_MSG_FREQ_Y = 105;
+static constexpr int16_t SENSOR_MSG_FREQ_X = 5;
+static constexpr int16_t SENSOR_MSG_FREQ_COLOUR = TFT_YELLOW;
+
+static constexpr int16_t BAUD_Y = 105;
+static constexpr int16_t BAUD_X = 129;
+static constexpr int16_t BAUD_COLOUR = TFT_YELLOW;
 
 static constexpr int16_t SPOT_LIMIT_LABEL_Y_OFFSET = 8;
 static constexpr int16_t FORWARD_ARROW_LENGTH = 30;
@@ -100,21 +172,31 @@ static constexpr uint16_t SOUND_TOGGLE_ON_TONES[SOUND_TOGGLE_TONE_COUNT] = {
 static constexpr uint16_t SOUND_TOGGLE_OFF_TONES[SOUND_TOGGLE_TONE_COUNT] = {
     1319, 1047, 784};
 static constexpr double INVERSION_DOT_THRESHOLD = 0.0;
-static constexpr uint32_t IMU_LINK_BAUD = 9600;
-static constexpr int8_t IMU_LINK_CONTROLLER_TX_PIN = 32;
-static constexpr int8_t IMU_LINK_CONTROLLER_RX_PIN = 33;
+static constexpr int8_t IMU_LINK_M5_YELLOW_LABEL_GROVE_GPIO = 32;
+static constexpr int8_t IMU_LINK_M5_WHITE_LABEL_GROVE_GPIO = 33;
+static constexpr int8_t HC12_SET_GPIO = 26;
+static constexpr bool HC12_CONFIGURE_BAUD_ON_STARTUP = DEVICE_HAS_RADIO_LINK;
+static constexpr bool HC12_AT_DIAGNOSTICS = true;
+static constexpr bool HC12_FORCE_BAUD_SET_ON_STARTUP = false;
+static constexpr uint32_t HC12_DIAGNOSTIC_SERIAL_WAIT_MS = 1500;
+static constexpr uint32_t HC12_COMMAND_MODE_ENTER_MS = 50;
+static constexpr uint32_t HC12_COMMAND_MODE_EXIT_MS = 90;
+static constexpr uint32_t HC12_COMMAND_RESPONSE_TIMEOUT_MS = 200;
+static constexpr uint32_t HC12_QUERY_RESPONSE_TIMEOUT_MS = 500;
+static constexpr uint32_t HC12_SUPPORTED_BAUDS[] = {
+    1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
 // static constexpr int8_t IMU_LINK_RX_PIN = 33;
 // TX Sensor Yellow 32 --> RXD on radio (with no heatshrink)
 // RX Sensor White 33 --> TXD on radio (with no heatshrink)
 static constexpr int8_t IMU_LINK_RX_PIN = (   // with radio 33 needed no matter what
-            DEVICE_HAS_RADIO_LINK ? 33
-                          : (DEVICE_IS_SENSOR_NODE ? 33 : 32));
+            DEVICE_HAS_RADIO_LINK ? IMU_LINK_M5_WHITE_LABEL_GROVE_GPIO
+                          : (DEVICE_IS_SENSOR_NODE ? IMU_LINK_M5_WHITE_LABEL_GROVE_GPIO : IMU_LINK_M5_YELLOW_LABEL_GROVE_GPIO));
 // 
 // RX Sensor Yellow 32 --> TXD on radio
 //static constexpr int8_t IMU_LINK_TX_PIN = 32;
 static constexpr int8_t IMU_LINK_TX_PIN = // with radio 32 needed no matter what;
-(    DEVICE_HAS_RADIO_LINK ? 32
-                          : (DEVICE_IS_SENSOR_NODE ? 32 : 33) );
+(    DEVICE_HAS_RADIO_LINK ? IMU_LINK_M5_YELLOW_LABEL_GROVE_GPIO
+                          : (DEVICE_IS_SENSOR_NODE ? IMU_LINK_M5_YELLOW_LABEL_GROVE_GPIO : IMU_LINK_M5_WHITE_LABEL_GROVE_GPIO) );
 
 static constexpr uint8_t IMU_LINK_MAGIC_0 = 0xA5;
 static constexpr uint8_t IMU_LINK_MAGIC_1 = 0x5A;
@@ -122,9 +204,9 @@ static constexpr uint8_t IMU_LINK_VERSION = 1;
 static constexpr uint8_t IMU_LINK_FLAG_INVERTED = 0x01;
 static constexpr uint8_t IMU_LINK_VERSION_SHIFT = 4;
 static constexpr uint8_t IMU_LINK_FRAME_BYTES = 8;
-static constexpr uint32_t IMU_LINK_SEND_INTERVAL_MS = 20;
-static constexpr uint32_t IMU_LINK_TIMEOUT_MS = 250;
 static constexpr bool SHOW_IMU_LINK_DIAGNOSTICS = true;
+static constexpr bool IMU_LINK_SERIAL_DIAGNOSTICS = true;
+static constexpr uint32_t IMU_LINK_SERIAL_DIAGNOSTIC_MS = 1000;
 
 struct HeadsUpLimitConfig {
     double level_limit_degrees;
@@ -183,6 +265,11 @@ struct ImuLinkDiagnostics {
     uint32_t version_errors;
 };
 
+struct MessageRateTracker {
+    uint32_t bucket_started_ms[MESSAGE_RATE_BUCKET_COUNT];
+    uint16_t bucket_count[MESSAGE_RATE_BUCKET_COUNT];
+};
+
 bool FeedbackBeepActive = false;
 uint32_t FeedbackBeepStartedMs = 0;
 uint32_t FeedbackBeepDurationMs = 0;
@@ -194,6 +281,9 @@ uint32_t SoundToggleTonesStartedMs = 0;
 
 HardwareSerial ImuLinkSerial(2);
 ImuLinkDiagnostics ImuLinkDiag = {0, 0, 0, 0};
+MessageRateTracker ImuLinkRateTracker = {{0}, {0}};
+
+void drawBaudRate(TFT_eSprite *display, uint32_t baud, uint32_t tx_send_interval_ms);
 
 hw_timer_t *timer = NULL;
 volatile SemaphoreHandle_t timerSemaphore;
@@ -229,6 +319,242 @@ bool checkAXP192() {
 
 void Displaybuff() {
     Disbuff.pushSprite(0, 0);
+}
+
+void startupWaitMs(uint32_t wait_ms) {
+    uint32_t started_ms = millis();
+    while (millis() - started_ms < wait_ms) {
+        M5.update();
+        yield();
+    }
+}
+
+void beginImuLinkSerial(uint32_t baud) {
+    ImuLinkSerial.end();
+    ImuLinkSerial.begin(baud, SERIAL_8N1, IMU_LINK_RX_PIN, IMU_LINK_TX_PIN);
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("IMU UART: begin baud=%lu rx=%d tx=%d\r\n",
+                      (unsigned long)baud, IMU_LINK_RX_PIN, IMU_LINK_TX_PIN);
+    }
+}
+
+void releaseHc12SetPin() {
+    pinMode(HC12_SET_GPIO, INPUT);
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12 SET GPIO%d released high/input\r\n",
+                      HC12_SET_GPIO);
+    }
+}
+
+void pullHc12SetPinLow() {
+    digitalWrite(HC12_SET_GPIO, LOW);
+    pinMode(HC12_SET_GPIO, OUTPUT);
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12 SET GPIO%d pulled low/output\r\n",
+                      HC12_SET_GPIO);
+    }
+}
+
+void enterHc12CommandMode() {
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.println("HC12: entering AT command mode");
+    }
+    pullHc12SetPinLow();
+    startupWaitMs(HC12_COMMAND_MODE_ENTER_MS);
+}
+
+void exitHc12CommandMode() {
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.println("HC12: exiting AT command mode");
+    }
+    releaseHc12SetPin();
+    startupWaitMs(HC12_COMMAND_MODE_EXIT_MS);
+}
+
+void clearImuLinkSerialInput() {
+    while (ImuLinkSerial.available() > 0) {
+        ImuLinkSerial.read();
+    }
+}
+
+bool readHc12Response(char *response, size_t response_size,
+                      const char *expected_response, uint32_t timeout_ms) {
+    if (response_size == 0) {
+        return false;
+    }
+
+    size_t response_length = 0;
+    response[0] = '\0';
+    uint32_t started_ms = millis();
+    while (millis() - started_ms < timeout_ms) {
+        while (ImuLinkSerial.available() > 0) {
+            char value = (char)ImuLinkSerial.read();
+            if (response_length + 1 < response_size) {
+                response[response_length++] = value;
+                response[response_length] = '\0';
+            }
+        }
+        if (strstr(response, expected_response) != NULL) {
+            if (HC12_AT_DIAGNOSTICS) {
+                Serial.printf("HC12 RX: \"%s\"\r\n", response);
+            }
+            return true;
+        }
+        M5.update();
+        yield();
+    }
+
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12 RX timeout waiting for \"%s\", got \"%s\"\r\n",
+                      expected_response, response);
+    }
+    return false;
+}
+
+bool sendHc12Command(const char *command, const char *expected_response) {
+    char response[24];
+
+    clearImuLinkSerialInput();
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12 TX: \"%s\", expecting \"%s\"\r\n", command,
+                      expected_response);
+    }
+    ImuLinkSerial.print(command);
+    ImuLinkSerial.flush();
+
+    if (!readHc12Response(response, sizeof(response), expected_response,
+                          HC12_COMMAND_RESPONSE_TIMEOUT_MS)) {
+        return false;
+    }
+    return true;
+}
+
+bool queryHc12Settings(uint32_t expected_baud) {
+    char response[96];
+    char expected_response[16];
+
+    snprintf(expected_response, sizeof(expected_response), "OK+B%lu",
+             (unsigned long)expected_baud);
+
+    clearImuLinkSerialInput();
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12 TX: \"AT+RX\", expecting \"%s\"\r\n",
+                      expected_response);
+    }
+    ImuLinkSerial.print("AT+RX");
+    ImuLinkSerial.flush();
+
+    if (!readHc12Response(response, sizeof(response), expected_response,
+                          HC12_QUERY_RESPONSE_TIMEOUT_MS)) {
+        Serial.println("HC12: AT+RX query failed");
+        return false;
+    }
+
+    Serial.printf("HC12: settings query returned \"%s\"\r\n", response);
+    return true;
+}
+
+bool hc12CommandModeRespondsAt(uint32_t baud) {
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12: probing command baud %lu\r\n",
+                      (unsigned long)baud);
+    }
+    beginImuLinkSerial(baud);
+    startupWaitMs(5);
+    return sendHc12Command("AT", "OK");
+}
+
+uint32_t findHc12CommandBaud(uint32_t preferred_baud) {
+    if (hc12CommandModeRespondsAt(preferred_baud)) {
+        return preferred_baud;
+    }
+
+    if (preferred_baud != 9600 && hc12CommandModeRespondsAt(9600)) {
+        return 9600;
+    }
+
+    for (uint8_t index = 0;
+         index < sizeof(HC12_SUPPORTED_BAUDS) / sizeof(HC12_SUPPORTED_BAUDS[0]);
+         index++) {
+        uint32_t baud = HC12_SUPPORTED_BAUDS[index];
+        if (baud == preferred_baud || baud == 9600) {
+            continue;
+        }
+        if (hc12CommandModeRespondsAt(baud)) {
+            return baud;
+        }
+    }
+
+    return 0;
+}
+
+bool setHc12BaudRate(uint32_t target_baud) {
+    char command[16];
+    char expected_response[16];
+
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12: configure target baud=%lu\r\n",
+                      (unsigned long)target_baud);
+    }
+    enterHc12CommandMode();
+    uint32_t command_baud = findHc12CommandBaud(target_baud);
+    if (command_baud == 0) {
+        exitHc12CommandMode();
+        beginImuLinkSerial(target_baud);
+        Serial.println("HC12: no AT response, using configured UART baud");
+        return false;
+    }
+
+    Serial.printf("HC12: command mode at %lu baud\r\n",
+                  (unsigned long)command_baud);
+
+    if (command_baud != target_baud || HC12_FORCE_BAUD_SET_ON_STARTUP) {
+        snprintf(command, sizeof(command), "AT+B%lu",
+                 (unsigned long)target_baud);
+        snprintf(expected_response, sizeof(expected_response), "OK+B%lu",
+                 (unsigned long)target_baud);
+        if (!sendHc12Command(command, expected_response)) {
+            exitHc12CommandMode();
+            beginImuLinkSerial(target_baud);
+            Serial.printf("HC12: failed to set baud to %lu\r\n",
+                          (unsigned long)target_baud);
+            return false;
+        }
+        Serial.printf("HC12: baud set to %lu\r\n", (unsigned long)target_baud);
+        if (command_baud != target_baud) {
+            exitHc12CommandMode();
+            beginImuLinkSerial(target_baud);
+            enterHc12CommandMode();
+        }
+    } else if (HC12_AT_DIAGNOSTICS) {
+        Serial.println("HC12: baud already matches target");
+    }
+
+    queryHc12Settings(target_baud);
+
+    exitHc12CommandMode();
+    beginImuLinkSerial(target_baud);
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12: normal data mode at %lu baud\r\n",
+                      (unsigned long)target_baud);
+    }
+    return true;
+}
+
+void setupImuLinkSerial() {
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("IMU link setup: radio=%s role=%s configured_baud=%lu\r\n",
+                      DEVICE_HAS_RADIO_LINK ? "yes" : "no",
+                      DEVICE_IS_SENSOR_NODE ? "sensor" : "controller",
+                      (unsigned long)active_comms_config.imu_link_baud);
+    }
+    releaseHc12SetPin();
+    if (HC12_CONFIGURE_BAUD_ON_STARTUP) {
+        setHc12BaudRate(active_comms_config.imu_link_baud);
+        return;
+    }
+
+    beginImuLinkSerial(active_comms_config.imu_link_baud);
 }
 
 bool point3Dto2D(point_3d_t *source, point_2d_t *point) {
@@ -371,6 +697,74 @@ double clampDouble(double value, double min_value, double max_value) {
     return value;
 }
 
+uint32_t messageRateBucketMs() {
+    return MESSAGE_RATE_WINDOW_MS / MESSAGE_RATE_BUCKET_COUNT;
+}
+
+void recordMessageRateEvent(uint32_t now) {
+    uint32_t bucket_ms = messageRateBucketMs();
+    uint32_t bucket_started_ms = now - (now % bucket_ms);
+    uint8_t bucket_index =
+        (bucket_started_ms / bucket_ms) % MESSAGE_RATE_BUCKET_COUNT;
+
+    if (ImuLinkRateTracker.bucket_started_ms[bucket_index] !=
+        bucket_started_ms) {
+        ImuLinkRateTracker.bucket_started_ms[bucket_index] = bucket_started_ms;
+        ImuLinkRateTracker.bucket_count[bucket_index] = 0;
+    }
+    ImuLinkRateTracker.bucket_count[bucket_index]++;
+}
+
+double averageMessageRatePerSecond() {
+    uint32_t now = millis();
+    uint32_t window_started_ms =
+        now > MESSAGE_RATE_WINDOW_MS ? now - MESSAGE_RATE_WINDOW_MS : 0;
+    uint32_t count = 0;
+    for (uint8_t index = 0; index < MESSAGE_RATE_BUCKET_COUNT; index++) {
+        uint32_t bucket_started_ms =
+            ImuLinkRateTracker.bucket_started_ms[index];
+        if (bucket_started_ms >= window_started_ms &&
+            bucket_started_ms <= now) {
+            count += ImuLinkRateTracker.bucket_count[index];
+        }
+    }
+
+    uint32_t elapsed_ms = now - window_started_ms;
+    if (elapsed_ms == 0) {
+        return 0.0;
+    }
+
+    return (count * 1000.0) / elapsed_ms;
+}
+
+double expectedMessageRatePerSecond() {
+    uint32_t interval_ms = active_comms_config.imu_link_send_interval_ms;
+    if (interval_ms == 0) {
+        return 0.0;
+    }
+
+    return 1000.0 / interval_ms;
+}
+
+void formatMessageRateText(char *rate_text, size_t rate_text_size) {
+    double message_rate = averageMessageRatePerSecond();
+    if (MESSAGE_RATE_AS_PERCENT) {
+        double expected_rate = expectedMessageRatePerSecond();
+        int percent =
+            expected_rate > 0.0
+                ? (int)((message_rate * 100.0 / expected_rate) + 0.5)
+                : 100;
+        if (percent < 0) {
+            percent = 0;
+        } else if (percent > 100) {
+            percent = 100;
+        }
+        snprintf(rate_text, rate_text_size, "%d%%", percent);
+    } else {
+        snprintf(rate_text, rate_text_size, "%.0f/s", message_rate);
+    }
+}
+
 int16_t degreesToCentidegrees(double degrees) {
     double centidegrees = degrees * 100.0;
     if (centidegrees <= -32768.0) {
@@ -402,14 +796,26 @@ uint8_t imuLinkChecksum(uint8_t *frame) {
 
 void sendImuLinkSample(double pitch_degrees, double roll_degrees,
                        bool inverted) {
-    static bool sent_once = false;
-    static uint32_t last_sent_ms = 0;
+    static bool schedule_started = false;
+    static uint32_t next_send_due_ms = 0;
     uint32_t now = millis();
-    if (sent_once && now - last_sent_ms < IMU_LINK_SEND_INTERVAL_MS) {
-//        return;
+    uint32_t interval_ms = active_comms_config.imu_link_send_interval_ms;
+
+    if (interval_ms > 0) {
+        if (!schedule_started) {
+            schedule_started = true;
+            next_send_due_ms = now;
+        }
+        if ((int32_t)(now - next_send_due_ms) < 0) {
+            return;
+        }
+        do {
+            next_send_due_ms += interval_ms;
+        } while ((int32_t)(now - next_send_due_ms) >= 0);
+    } else {
+        schedule_started = false;
+        next_send_due_ms = now;
     }
-    sent_once = true;
-    last_sent_ms = now;
 
     uint8_t frame[IMU_LINK_FRAME_BYTES] = {0};
 
@@ -421,7 +827,12 @@ void sendImuLinkSample(double pitch_degrees, double roll_degrees,
     writeInt16LE(frame, 5, degreesToCentidegrees(roll_degrees));
     frame[7] = imuLinkChecksum(frame);
 
+    if (ImuLinkSerial.availableForWrite() < IMU_LINK_FRAME_BYTES) {
+        return;
+    }
+
     ImuLinkSerial.write(frame, IMU_LINK_FRAME_BYTES);
+    recordMessageRateEvent(now);
 }
 
 bool decodeImuLinkFrame(uint8_t *frame, RemoteImuSample *sample) {
@@ -447,6 +858,7 @@ bool decodeImuLinkFrame(uint8_t *frame, RemoteImuSample *sample) {
     sample->received_ms = millis();
     sample->valid = true;
     ImuLinkDiag.frames_received++;
+    recordMessageRateEvent(sample->received_ms);
     return true;
 }
 
@@ -480,7 +892,36 @@ bool readRemoteImuSample(RemoteImuSample *sample) {
 }
 
 bool remoteImuSampleIsFresh(RemoteImuSample *sample) {
-    return sample->valid && millis() - sample->received_ms <= IMU_LINK_TIMEOUT_MS;
+    return sample->valid &&
+           millis() - sample->received_ms <=
+               active_comms_config.imu_link_timeout_ms;
+}
+
+void printImuLinkRuntimeDiagnostics(RemoteImuSample *sample,
+                                    bool have_attitude_sample) {
+    static uint32_t last_printed_ms = 0;
+    if (!IMU_LINK_SERIAL_DIAGNOSTICS || DEVICE_IS_SENSOR_NODE) {
+        return;
+    }
+
+    uint32_t now = millis();
+    if (last_printed_ms != 0 &&
+        now - last_printed_ms < IMU_LINK_SERIAL_DIAGNOSTIC_MS) {
+        return;
+    }
+    last_printed_ms = now;
+
+    Serial.printf(
+        "Controller RX: bytes=%lu frames=%lu rate=%.1f/s checksum=%lu version=%lu fresh=%s pitch=%.1f roll=%.1f inverted=%d\r\n",
+        (unsigned long)ImuLinkDiag.bytes_received,
+        (unsigned long)ImuLinkDiag.frames_received,
+        averageMessageRatePerSecond(),
+        (unsigned long)ImuLinkDiag.checksum_errors,
+        (unsigned long)ImuLinkDiag.version_errors,
+        have_attitude_sample ? "yes" : "no",
+        sample->pitch_degrees,
+        sample->roll_degrees,
+        sample->inverted ? 1 : 0);
 }
 
 void readTiltSample(double *theta, double *phi, AccelVector *accel) {
@@ -658,7 +1099,7 @@ void drawHeadsUpAttitudeLabel(TFT_eSprite *display, double pitch_degrees,
 void drawDeviceRoleLabel(TFT_eSprite *display, bool sensor_node_mode)
 {
     display->setTextSize(2);
-    display->setTextColor(TFT_WHITE);
+    display->setTextColor(DEVICE_MODE_COLOUR);
     const char *sensor_label = "S";
     const char *controller_label = "C";
 
@@ -667,13 +1108,31 @@ void drawDeviceRoleLabel(TFT_eSprite *display, bool sensor_node_mode)
         DEVICE_MODE_Y, 2);
 }
 
+void drawMessageRate(TFT_eSprite *display) {
+    static char message_rate_text[10] = "0/s";
+    static uint32_t last_updated_ms = 0;
+    uint32_t now = millis();
+    if (last_updated_ms == 0 ||
+        now - last_updated_ms >= MESSAGE_RATE_DISPLAY_UPDATE_MS) {
+        formatMessageRateText(message_rate_text, sizeof(message_rate_text));
+        last_updated_ms = now;
+    }
+
+    display->setTextSize(2);
+    display->setTextColor(MESSAGE_RATE_COLOUR);
+    display->drawString(message_rate_text, MESSAGE_RATE_X, MESSAGE_RATE_Y, 2);
+    display->setTextSize(1);
+}
+
 void drawImuLinkWaitingLabel(TFT_eSprite *display) {
     char diagnostic_text[40];
+
+    uint16_t shift_uart_msg_upwards = 50;
 
     display->setTextSize(2);
     display->setTextColor(TFT_RED);
     display->drawCentreString("NO UART", PLOT_CENTER_X,
-                              DISPLAY_HEIGHT / 2 - 8, 1);
+                              DISPLAY_HEIGHT / 2 - 8 - shift_uart_msg_upwards, 1);
     if (SHOW_IMU_LINK_DIAGNOSTICS) {
         snprintf(diagnostic_text, sizeof(diagnostic_text), "B%lu F%lu C%lu V%lu",
                  (unsigned long)ImuLinkDiag.bytes_received,
@@ -683,8 +1142,11 @@ void drawImuLinkWaitingLabel(TFT_eSprite *display) {
         display->setTextSize(1);
         display->setTextColor(TFT_WHITE);
         display->drawCentreString(diagnostic_text, PLOT_CENTER_X,
-                                  DISPLAY_HEIGHT / 2 + 14, 1);
+                                  DISPLAY_HEIGHT / 2 + 14 - shift_uart_msg_upwards, 1);
     }
+
+    drawBaudRate(display, active_comms_config.imu_link_baud, active_comms_config.imu_link_send_interval_ms);
+
     display->setTextSize(1);
 }
 
@@ -773,6 +1235,27 @@ void drawHeadsUpForwardArrow(TFT_eSprite *display,
                           arrow_base_y,
                           geometry->center_x + FORWARD_ARROW_HALF_WIDTH,
                           arrow_base_y, background_color);
+}
+
+void drawBaudRate(TFT_eSprite *display, uint32_t baud, uint32_t tx_send_interval_ms)
+{
+    String tx_msg_freq;
+
+    if (tx_send_interval_ms == 0)
+        tx_msg_freq = "+Hz";
+    else
+    {
+        uint32_t frequency = float(1)/float(tx_send_interval_ms) * 1000.0;
+        tx_msg_freq = String(frequency)+"Hz";
+    }
+    
+    display->setTextColor(SENSOR_MSG_FREQ_COLOUR);
+    display->setTextSize(2);
+    display->drawString(tx_msg_freq,SENSOR_MSG_FREQ_X,SENSOR_MSG_FREQ_Y,1);
+
+    display->setTextColor(BAUD_COLOUR);
+    display->setTextSize(2);
+    display->drawRightString(String(baud),BAUD_X,BAUD_Y,1);
 }
 
 int16_t roundDoubleToInt16(double value) {
@@ -910,6 +1393,7 @@ HeadsUpAlertState drawHeadsUpPlot(TFT_eSprite *display, double pitch_degrees,
                           geometry.center_y + geometry.radius_y, spot_color);
     drawHeadsUpForwardArrow(display, &geometry, spot_color,
                             plot_background_color);
+    drawBaudRate(display, active_comms_config.imu_link_baud, active_comms_config.imu_link_send_interval_ms);
 
     if (alert_state == HeadsUpAlertState::Alarm && spot_color == TFT_RED) {
         drawRedSpotReturnArrow(display, &geometry, spot_x, spot_y,
@@ -1219,6 +1703,7 @@ void MPU6886Test_heads_up(bool show_cube) {
             inverted = remote_sample.inverted;
             have_attitude_sample = true;
         }
+        printImuLinkRuntimeDiagnostics(&remote_sample, have_attitude_sample);
 
         Disbuff.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                          DISPLAY_BACKGROUND_COLOR);
@@ -1248,6 +1733,7 @@ void MPU6886Test_heads_up(bool show_cube) {
         HeadsUpAlertState alert_state =
             drawHeadsUpPlot(&Disbuff, pitch_delta, roll_delta, ellipse_mode,
                             inverted);
+        drawMessageRate(&Disbuff);
         updateHeadsUpAlerts(alert_state);
 
         Displaybuff();
@@ -1301,8 +1787,12 @@ void setup()
     M5.begin();
     M5.Axp.ScreenBreath(100);    
     Serial.begin(115200);
-    ImuLinkSerial.begin(IMU_LINK_BAUD, SERIAL_8N1, IMU_LINK_RX_PIN,
-                        IMU_LINK_TX_PIN);
+    if (HC12_AT_DIAGNOSTICS) {
+        startupWaitMs(HC12_DIAGNOSTIC_SERIAL_WAIT_MS);
+        Serial.println();
+        Serial.println("HUD boot: starting HC-12 diagnostics");
+    }
+    setupImuLinkSerial();
 
     pinMode(M5_LED, OUTPUT);
     setRedLed(false);

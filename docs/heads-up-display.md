@@ -45,6 +45,14 @@ M5.Axp.ScreenBreath(100);
   - `C` for display controller.
   It is drawn immediately after the navy background clear, before the plot and
   spot, so attitude graphics can paint over it.
+- The message rate is drawn near the role marker using a 3-second rolling mean.
+  On the sensor node this reflects transmitted frames; on the display controller
+  it reflects valid received frames. `MESSAGE_RATE_AS_PERCENT` switches the
+  display from messages per second to percent of the configured expected rate.
+  Unlike the role marker, message rate is drawn after the plot and spot so it
+  remains readable over the ellipse or circle. The displayed text refreshes every
+  `MESSAGE_RATE_DISPLAY_UPDATE_MS`, currently `250 ms`, to reduce visual
+  flicker.
 
 ## Controller/Sensor UART Mode
 
@@ -92,15 +100,26 @@ HardwareSerial ImuLinkSerial(2);
 
 Current link settings:
 
-- Baud rate: `9600`.
-- Controller RX / sensor TX pin: GPIO `32`.
-- Controller TX / sensor RX pin: GPIO `33`.
+- Baud rate: controlled by `active_comms_config.imu_link_baud`.
+- Radio-link wiring:
+  - M5 TX GPIO `32` to HC-12 `RXD`.
+  - M5 RX GPIO `33` to HC-12 `TXD`.
+  - M5 GPIO `26` to HC-12 `SET`.
+- Direct hardwired M5-to-M5 wiring:
+  - The role flag swaps RX/TX internally, so the Grove GPIOs can be crossed
+    between devices.
 - Data format: `SERIAL_8N1`.
 
-This means two M5StickC Plus Grove ports can be connected straight-through:
-GPIO `32` to GPIO `32`, GPIO `33` to GPIO `33`, and ground to ground. The role
-flag swaps RX/TX internally so the sensor node transmits on the pin that the
-display controller receives.
+When `DEVICE_HAS_RADIO_LINK` is true, both devices use the same local wiring to
+their own HC-12 module. The radio link performs the remote crossover. At startup
+the firmware releases `SET` for normal mode, briefly pulls it low to enter AT
+command mode, scans the supported HC-12 UART baud rates until the module
+responds, sends `AT+B...` if the module baud does not match
+`active_comms_config.imu_link_baud`, then releases `SET` and opens the IMU data
+UART at the configured baud. When the baud is changed, the firmware cycles out
+of and back into AT command mode before querying settings with `AT+RX`; this is
+needed because the HC-12 may not answer the query immediately after `AT+B...`
+without a command-mode cycle.
 
 The existing USB `Serial` object is still available for local debug messages, but
 it is not used for the IMU data link.
@@ -122,18 +141,22 @@ floating-point text over the UART link.
 
 There is no sequence number. Dropped frames are acceptable for this HUD; the
 controller simply uses the newest valid frame. The sensor node also throttles
-transmit to `IMU_LINK_SEND_INTERVAL_MS`, currently `20 ms`, so the stream is
-about 50 frames per second. At 8 bytes per frame this uses about 4000 bits per
-second on the UART after start/stop bits are included, leaving useful headroom
-for a 9600 baud 433 MHz serial link.
+transmit using `active_comms_config.imu_link_send_interval_ms`. The throttle is
+anchored to a fixed next-send schedule, so a late display frame does not shift
+all future sends later. Before writing, the sender checks that the UART TX
+buffer has room for a complete frame; if not, it skips that stale sample rather
+than blocking the display loop. For example, a `20 ms` interval gives about
+50 frames per second. At 8 bytes per frame this uses about 4000 bits per second
+on the UART after start/stop bits are included, leaving useful headroom for a
+9600 baud 433 MHz serial link.
 
 The receiver parser is non-blocking and consumes all available UART bytes each
 HUD frame. It uses the magic bytes to resynchronise after dropped or noisy data.
-If no valid frame is received for `IMU_LINK_TIMEOUT_MS`, currently `250 ms`, the
-display controller shows `NO UART`. The current loop suppresses alert sounds
-while waiting for the link. When `SHOW_IMU_LINK_DIAGNOSTICS` is enabled, the
-error screen also shows byte, valid frame, checksum error, and version error
-counters.
+If no valid frame is received for
+`active_comms_config.imu_link_timeout_ms`, the display controller shows
+`NO UART`. The current loop suppresses alert sounds while waiting for the link.
+When `SHOW_IMU_LINK_DIAGNOSTICS` is enabled, the error screen also shows byte,
+valid frame, checksum error, and version error counters.
 
 ## Controls
 
@@ -352,14 +375,31 @@ Important functions and responsibilities:
 - `sendImuLinkSample()`
   - Packs referenced pitch, referenced roll, and inverted flag into the 8-byte
     UART frame format.
-  - Throttles transmission using `IMU_LINK_SEND_INTERVAL_MS`.
+  - Throttles transmission using a fixed schedule based on
+    `active_comms_config.imu_link_send_interval_ms`.
+  - Skips a frame instead of blocking if the UART TX buffer cannot accept a full
+    8-byte frame immediately.
+
+- `setupImuLinkSerial()`, `setHc12BaudRate()`
+  - Release/pull the HC-12 `SET` pin through `HC12_SET_GPIO`.
+  - In radio-link mode, enter HC-12 AT command mode during startup and set the
+    module UART baud to match `active_comms_config.imu_link_baud`.
+  - Query the module with `AT+RX` and expect the returned baud, for example
+    `OK+B115200`, before entering normal data mode.
+  - Re-open `ImuLinkSerial` at the final data baud before the HUD loop starts.
 
 - `readRemoteImuSample()`
   - Non-blocking UART receive/parser loop.
   - Keeps the newest valid sample in `RemoteImuSample`.
 
 - `remoteImuSampleIsFresh()`
-  - Rejects stale remote samples after `IMU_LINK_TIMEOUT_MS`.
+  - Rejects stale remote samples after
+    `active_comms_config.imu_link_timeout_ms`.
+
+- `recordMessageRateEvent()`, `averageMessageRatePerSecond()`
+  - Track sent or valid received frames in buckets over the last 3 seconds.
+  - Use a rolling mean because packet-loss testing needs the average delivered
+    frame rate rather than an outlier-resistant median.
 
 - `readTiltSample()`
   - Reads accelerometer data.
@@ -423,6 +463,118 @@ Important conventions:
   spot colour unless `PLOT_BACKGROUND_BLACK` is set.
 - The hollow inverted spot is deliberately different from the normal alarm spot
   because inverted-flat can otherwise look deceptively level.
+
+## Test Log
+
+### HC-12 115200 Baud Test, 2026-04-28
+
+Goal: configure both M5StickC Plus UARTs and both HC-12 modules to `115200`
+baud, then verify the sensor-to-controller attitude stream.
+
+Procedure:
+
+- Sensor stick on `/dev/cu.usbserial-5D5222C816` was flashed with
+  `DEVICE_IS_SENSOR_NODE = true` and
+  `active_comms_config = comms_unthrottled_115200_air`.
+- The sensor entered HC-12 AT mode through GPIO `26`, found the module still at
+  `9600`, sent `AT+B115200`, then confirmed `115200` with `AT+RX` on the next
+  startup.
+- The baud-change path was improved to cycle out of and back into HC-12 AT mode
+  after a real `AT+B...` change before running `AT+RX`.
+- Controller stick on `/dev/cu.usbserial-D55208AFE7` was flashed with
+  `DEVICE_IS_SENSOR_NODE = false` and
+  `active_comms_config = comms_unthrottled_115200_air`.
+
+Observed controller AT diagnostics:
+
+```text
+HC12 TX: "AT+B115200", expecting "OK+B115200"
+HC12 RX: "OK+B115200"
+HC12 TX: "AT+RX", expecting "OK+B115200"
+HC12 RX: "OK+B115200
+OK+RC001"
+HC12: normal data mode at 115200 baud
+```
+
+Observed controller receive diagnostics:
+
+```text
+IMU RX: bytes=4288 frames=535 rate=37.7/s checksum=0 version=0 fresh=yes
+IMU RX: bytes=6432 frames=803 rate=37.7/s checksum=0 version=0 fresh=yes
+IMU RX: bytes=7656 frames=956 rate=37.3/s checksum=0 version=0 fresh=yes
+```
+
+Conclusion: `115200` works cleanly with the current two-HC-12 bench setup. The
+message rate remains about `37/s`, which matches the existing display-loop limit
+rather than a UART/radio limit. During the captured controller run there were no
+checksum errors, no version errors, and the link stayed fresh.
+
+### HC-12 1200 Baud Unthrottled Test, 2026-04-28
+
+Goal: configure both M5StickC Plus UARTs and both HC-12 modules to `1200` baud,
+run the sensor unthrottled, and observe the practical maximum delivered frame
+rate.
+
+Procedure:
+
+- Sensor stick on `/dev/cu.usbserial-5D5222C816` was flashed with
+  `DEVICE_IS_SENSOR_NODE = true` and
+  `active_comms_config = comms_unthrottled_1200_water`.
+- The sensor found its HC-12 command interface at `115200`, sent `AT+B1200`,
+  cycled command mode, and confirmed `OK+B1200` with `AT+RX`.
+- Controller stick on `/dev/cu.usbserial-D55208AFE7` was flashed with
+  `DEVICE_IS_SENSOR_NODE = false` and
+  `active_comms_config = comms_unthrottled_1200_water`.
+- The controller also changed its HC-12 from `115200` to `1200` and confirmed
+  `OK+B1200`.
+
+Observed controller receive diagnostics:
+
+```text
+IMU RX: bytes=1214 frames=148 rate=15.0/s checksum=0 version=1 fresh=yes
+IMU RX: bytes=2067 frames=255 rate=15.0/s checksum=0 version=1 fresh=yes
+IMU RX: bytes=3041 frames=376 rate=15.0/s checksum=0 version=1 fresh=yes
+```
+
+Conclusion: unthrottled `1200` reaches about `14.7-15.0` valid frames per
+second, which is the expected UART ceiling for 8-byte frames on 8N1 serial:
+`1200 / (8 bytes * 10 bits) = 15 frames/s`. The non-blocking
+`availableForWrite()` guard prevents display stalls while stale samples are
+dropped before entering the UART queue. The captured run stayed fresh, showed
+no checksum errors, and had one version-counter increment during startup or
+resynchronisation.
+
+### HC-12 1200 Baud 12 Hz Test, 2026-04-28
+
+Goal: keep the HC-12 modules at `1200` baud but throttle the sensor to the
+`83 ms` fixed schedule, giving about `12 Hz` and leaving radio/UART headroom.
+
+Procedure:
+
+- Sensor stick on `/dev/cu.usbserial-5D5222C816` was flashed with
+  `DEVICE_IS_SENSOR_NODE = true` and
+  `active_comms_config = comms_12_Hz_1200_water`.
+- The sensor confirmed the HC-12 was already at `OK+B1200`.
+- Controller stick on `/dev/cu.usbserial-D55208AFE7` was flashed with
+  `DEVICE_IS_SENSOR_NODE = false` and
+  `active_comms_config = comms_12_Hz_1200_water`.
+- The controller confirmed the HC-12 was already at `OK+B1200`.
+
+Observed controller receive diagnostics:
+
+```text
+IMU RX: bytes=1172 frames=143 rate=12.3/s checksum=0 version=1 fresh=yes
+IMU RX: bytes=1854 frames=228 rate=12.0/s checksum=0 version=1 fresh=yes
+IMU RX: bytes=2539 frames=313 rate=11.7/s checksum=0 version=1 fresh=yes
+```
+
+Conclusion: the `12 Hz` schedule works cleanly at `1200` baud. It delivers
+about `11.7-12.3` valid frames per second, keeps the link fresh, and leaves
+roughly 20 percent serial headroom compared with the 15 frame/s line-rate
+ceiling. The captured run showed no checksum errors and one version-counter
+increment during startup or resynchronisation. This is a better candidate than
+unthrottled `1200` for underwater/range testing because it avoids running the
+link continuously at saturation.
 
 ## Future Feature Ideas
 

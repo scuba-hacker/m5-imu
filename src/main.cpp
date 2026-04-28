@@ -1,6 +1,7 @@
 #include "M5StickCPlus.h"
 
 const bool showCube = true;
+static constexpr bool DEVICE_IS_SENSOR_NODE = true;
 
 typedef struct {
     double x;
@@ -54,12 +55,17 @@ static constexpr int16_t ELLIPSE_PLOT_CENTER_Y =
 static constexpr int16_t ELLIPSE_PLOT_RADIUS_X = DISPLAY_WIDTH / 2;
 static constexpr int16_t ELLIPSE_PLOT_RADIUS_Y =
     (DISPLAY_HEIGHT - ELLIPSE_TOP_OFFSET) / 2;
+static constexpr bool START_IN_ELLIPSE_MODE = true;
 static constexpr int16_t SPOT_RADIUS = 10;
 static constexpr int16_t LEVEL_SPOT_RADIUS = 20;
 static constexpr int16_t PLOT_LINE_WIDTH = 3;
 static constexpr int16_t PITCH_LABEL_X = 20;
 static constexpr int16_t ROLL_LABEL_X = 115;
 static constexpr int16_t ATTITUDE_LABEL_Y = 5;
+
+static constexpr int16_t DEVICE_MODE_X = 125;
+static constexpr int16_t DEVICE_MODE_Y = 210;
+
 static constexpr int16_t SPOT_LIMIT_LABEL_Y_OFFSET = 8;
 static constexpr int16_t FORWARD_ARROW_LENGTH = 30;
 static constexpr int16_t FORWARD_ARROW_HALF_WIDTH = 8;
@@ -72,7 +78,9 @@ static constexpr int16_t RED_SPOT_RETURN_ARROW_SPOT_OVERLAP = 6;
 static constexpr uint16_t RED_SPOT_RETURN_ARROW_COLOR = TFT_MAGENTA;
 static constexpr int16_t HOLLOW_SPOT_RING_WIDTH = 4;
 static constexpr bool PLOT_BACKGROUND_BLACK = false;
-static constexpr uint16_t DISPLAY_BACKGROUND_COLOR = TFT_NAVY;
+static constexpr uint16_t DISPLAY_BACKGROUND_CONTROLLER_COLOR = TFT_NAVY;
+static constexpr uint16_t DISPLAY_BACKGROUND_SENSOR_COLOR = TFT_DARKCYAN;
+#define DISPLAY_BACKGROUND_COLOR (DEVICE_IS_SENSOR_NODE ? DISPLAY_BACKGROUND_SENSOR_COLOR : DISPLAY_BACKGROUND_CONTROLLER_COLOR)
 static constexpr uint16_t TFT_DARK_GREEN_70 = 0x0260;
 static constexpr uint16_t TFT_DARK_YELLOW_70 = 0x4A60;
 static constexpr uint16_t TFT_DARK_RED_70 = 0x4800;
@@ -100,6 +108,24 @@ static constexpr uint16_t SOUND_TOGGLE_ON_TONES[SOUND_TOGGLE_TONE_COUNT] = {
 static constexpr uint16_t SOUND_TOGGLE_OFF_TONES[SOUND_TOGGLE_TONE_COUNT] = {
     1319, 1047, 784};
 static constexpr double INVERSION_DOT_THRESHOLD = 0.0;
+static constexpr uint32_t IMU_LINK_BAUD = 9600;
+static constexpr int8_t IMU_LINK_CONTROLLER_RX_SENSOR_TX_PIN = 32;
+static constexpr int8_t IMU_LINK_CONTROLLER_TX_SENSOR_RX_PIN = 33;
+static constexpr int8_t IMU_LINK_RX_PIN =
+    DEVICE_IS_SENSOR_NODE ? IMU_LINK_CONTROLLER_TX_SENSOR_RX_PIN
+                          : IMU_LINK_CONTROLLER_RX_SENSOR_TX_PIN;
+static constexpr int8_t IMU_LINK_TX_PIN =
+    DEVICE_IS_SENSOR_NODE ? IMU_LINK_CONTROLLER_RX_SENSOR_TX_PIN
+                          : IMU_LINK_CONTROLLER_TX_SENSOR_RX_PIN;
+static constexpr uint8_t IMU_LINK_MAGIC_0 = 0xA5;
+static constexpr uint8_t IMU_LINK_MAGIC_1 = 0x5A;
+static constexpr uint8_t IMU_LINK_VERSION = 1;
+static constexpr uint8_t IMU_LINK_FLAG_INVERTED = 0x01;
+static constexpr uint8_t IMU_LINK_VERSION_SHIFT = 4;
+static constexpr uint8_t IMU_LINK_FRAME_BYTES = 8;
+static constexpr uint32_t IMU_LINK_SEND_INTERVAL_MS = 20;
+static constexpr uint32_t IMU_LINK_TIMEOUT_MS = 250;
+static constexpr bool SHOW_IMU_LINK_DIAGNOSTICS = true;
 
 struct HeadsUpLimitConfig {
     double level_limit_degrees;
@@ -143,6 +169,21 @@ struct AccelVector {
     double z;
 };
 
+struct RemoteImuSample {
+    double pitch_degrees;
+    double roll_degrees;
+    bool inverted;
+    bool valid;
+    uint32_t received_ms;
+};
+
+struct ImuLinkDiagnostics {
+    uint32_t bytes_received;
+    uint32_t frames_received;
+    uint32_t checksum_errors;
+    uint32_t version_errors;
+};
+
 bool FeedbackBeepActive = false;
 uint32_t FeedbackBeepStartedMs = 0;
 uint32_t FeedbackBeepDurationMs = 0;
@@ -151,6 +192,9 @@ bool SoundToggleTonesActive = false;
 const uint16_t *SoundToggleTones = NULL;
 uint8_t SoundToggleToneIndex = 0;
 uint32_t SoundToggleTonesStartedMs = 0;
+
+HardwareSerial ImuLinkSerial(2);
+ImuLinkDiagnostics ImuLinkDiag = {0, 0, 0, 0};
 
 hw_timer_t *timer = NULL;
 volatile SemaphoreHandle_t timerSemaphore;
@@ -334,6 +378,118 @@ double clampDouble(double value, double min_value, double max_value) {
     return value;
 }
 
+int16_t degreesToCentidegrees(double degrees) {
+    double centidegrees = degrees * 100.0;
+    if (centidegrees <= -32768.0) {
+        return -32768;
+    }
+    if (centidegrees >= 32767.0) {
+        return 32767;
+    }
+    return (int16_t)(centidegrees >= 0 ? centidegrees + 0.5
+                                       : centidegrees - 0.5);
+}
+
+void writeInt16LE(uint8_t *buffer, uint8_t offset, int16_t value) {
+    buffer[offset] = value & 0xFF;
+    buffer[offset + 1] = (value >> 8) & 0xFF;
+}
+
+int16_t readInt16LE(uint8_t *buffer, uint8_t offset) {
+    return (int16_t)(buffer[offset] | (buffer[offset + 1] << 8));
+}
+
+uint8_t imuLinkChecksum(uint8_t *frame) {
+    uint8_t checksum = 0;
+    for (uint8_t index = 0; index < IMU_LINK_FRAME_BYTES - 1; index++) {
+        checksum += frame[index];
+    }
+    return checksum;
+}
+
+void sendImuLinkSample(double pitch_degrees, double roll_degrees,
+                       bool inverted) {
+    static bool sent_once = false;
+    static uint32_t last_sent_ms = 0;
+    uint32_t now = millis();
+    if (sent_once && now - last_sent_ms < IMU_LINK_SEND_INTERVAL_MS) {
+        return;
+    }
+    sent_once = true;
+    last_sent_ms = now;
+
+    uint8_t frame[IMU_LINK_FRAME_BYTES] = {0};
+
+    frame[0] = IMU_LINK_MAGIC_0;
+    frame[1] = IMU_LINK_MAGIC_1;
+    frame[2] = (IMU_LINK_VERSION << IMU_LINK_VERSION_SHIFT) |
+               (inverted ? IMU_LINK_FLAG_INVERTED : 0);
+    writeInt16LE(frame, 3, degreesToCentidegrees(pitch_degrees));
+    writeInt16LE(frame, 5, degreesToCentidegrees(roll_degrees));
+    frame[7] = imuLinkChecksum(frame);
+
+    ImuLinkSerial.write(frame, IMU_LINK_FRAME_BYTES);
+}
+
+bool decodeImuLinkFrame(uint8_t *frame, RemoteImuSample *sample) {
+    if (frame[0] != IMU_LINK_MAGIC_0 || frame[1] != IMU_LINK_MAGIC_1) {
+        return false;
+    }
+
+    if ((frame[2] >> IMU_LINK_VERSION_SHIFT) != IMU_LINK_VERSION) {
+        if (frame[0] == IMU_LINK_MAGIC_0 && frame[1] == IMU_LINK_MAGIC_1) {
+            ImuLinkDiag.version_errors++;
+        }
+        return false;
+    }
+
+    if (frame[7] != imuLinkChecksum(frame)) {
+        ImuLinkDiag.checksum_errors++;
+        return false;
+    }
+
+    sample->pitch_degrees = readInt16LE(frame, 3) / 100.0;
+    sample->roll_degrees = readInt16LE(frame, 5) / 100.0;
+    sample->inverted = (frame[2] & IMU_LINK_FLAG_INVERTED) != 0;
+    sample->received_ms = millis();
+    sample->valid = true;
+    ImuLinkDiag.frames_received++;
+    return true;
+}
+
+bool readRemoteImuSample(RemoteImuSample *sample) {
+    static uint8_t frame[IMU_LINK_FRAME_BYTES] = {0};
+    static uint8_t frame_index = 0;
+    bool received_sample = false;
+
+    while (ImuLinkSerial.available() > 0) {
+        uint8_t value = ImuLinkSerial.read();
+        ImuLinkDiag.bytes_received++;
+        if (frame_index == 0 && value != IMU_LINK_MAGIC_0) {
+            continue;
+        }
+        if (frame_index == 1 && value != IMU_LINK_MAGIC_1) {
+            frame[0] = value;
+            frame_index = value == IMU_LINK_MAGIC_0 ? 1 : 0;
+            continue;
+        }
+
+        frame[frame_index++] = value;
+        if (frame_index >= IMU_LINK_FRAME_BYTES) {
+            if (decodeImuLinkFrame(frame, sample)) {
+                received_sample = true;
+            }
+            frame_index = 0;
+        }
+    }
+
+    return received_sample;
+}
+
+bool remoteImuSampleIsFresh(RemoteImuSample *sample) {
+    return sample->valid && millis() - sample->received_ms <= IMU_LINK_TIMEOUT_MS;
+}
+
 void readTiltSample(double *theta, double *phi, AccelVector *accel) {
     float accX = 0;
     float accY = 0;
@@ -503,6 +659,39 @@ void drawHeadsUpAttitudeLabel(TFT_eSprite *display, double pitch_degrees,
     display->drawCentreString(pitch_text, PITCH_LABEL_X, ATTITUDE_LABEL_Y, 1);
     display->setTextColor(TFT_MAGENTA);
     display->drawCentreString(roll_text, ROLL_LABEL_X, ATTITUDE_LABEL_Y, 1);
+    display->setTextSize(1);
+}
+
+void drawDeviceRoleLabel(TFT_eSprite *display, bool sensor_node_mode)
+{
+    display->setTextSize(2);
+    display->setTextColor(TFT_WHITE);
+    const char *sensor_label = "S";
+    const char *controller_label = "C";
+
+    display->drawCentreString(
+        sensor_node_mode ? sensor_label : controller_label, DEVICE_MODE_X,
+        DEVICE_MODE_Y, 2);
+}
+
+void drawImuLinkWaitingLabel(TFT_eSprite *display) {
+    char diagnostic_text[40];
+
+    display->setTextSize(2);
+    display->setTextColor(TFT_RED);
+    display->drawCentreString("NO UART", PLOT_CENTER_X,
+                              DISPLAY_HEIGHT / 2 - 8, 1);
+    if (SHOW_IMU_LINK_DIAGNOSTICS) {
+        snprintf(diagnostic_text, sizeof(diagnostic_text), "B%lu F%lu C%lu V%lu",
+                 (unsigned long)ImuLinkDiag.bytes_received,
+                 (unsigned long)ImuLinkDiag.frames_received,
+                 (unsigned long)ImuLinkDiag.checksum_errors,
+                 (unsigned long)ImuLinkDiag.version_errors);
+        display->setTextSize(1);
+        display->setTextColor(TFT_WHITE);
+        display->drawCentreString(diagnostic_text, PLOT_CENTER_X,
+                                  DISPLAY_HEIGHT / 2 + 14, 1);
+    }
     display->setTextSize(1);
 }
 
@@ -936,20 +1125,21 @@ void MPU6886Test_heads_up(bool show_cube) {
     double phi = 0, last_phi = 0;
     double alpha = 0.2;
     AccelVector reference_accel = {0, 0, 1};
+    RemoteImuSample remote_sample = {0, 0, false, false, 0};
 
-    readTiltSample(&theta_reference, &phi_reference, &reference_accel);
-    theta = last_theta = theta_reference;
-    phi = last_phi = phi_reference;
+    if (DEVICE_IS_SENSOR_NODE) {
+        readTiltSample(&theta_reference, &phi_reference, &reference_accel);
+        theta = last_theta = theta_reference;
+        phi = last_phi = phi_reference;
+    }
 
     line_3d_t rect_source[12];
-    if (show_cube) {
-        prepareHeadsUpCube(rect_source);
-    }
+    bool cube_prepared = false;
 
     bool button_a_tracking = false;
     bool geometry_toggle_handled = false;
     uint32_t button_a_press_started_ms = 0;
-    bool ellipse_mode = false;
+    bool ellipse_mode = START_IN_ELLIPSE_MODE;
     bool button_b_tracking = false;
     bool sound_toggle_handled = false;
     uint32_t button_b_press_started_ms = 0;
@@ -958,10 +1148,14 @@ void MPU6886Test_heads_up(bool show_cube) {
         double raw_theta = 0;
         double raw_phi = 0;
         AccelVector current_accel = {0, 0, 1};
-        readTiltSample(&raw_theta, &raw_phi, &current_accel);
+        if (DEVICE_IS_SENSOR_NODE) {
+            readTiltSample(&raw_theta, &raw_phi, &current_accel);
 
-        theta = alpha * raw_theta + (1 - alpha) * last_theta;
-        phi   = alpha * raw_phi + (1 - alpha) * last_phi;
+            theta = alpha * raw_theta + (1 - alpha) * last_theta;
+            phi   = alpha * raw_phi + (1 - alpha) * last_phi;
+        } else {
+            readRemoteImuSample(&remote_sample);
+        }
 
         if (M5.BtnA.wasPressed() ||
             (!button_a_tracking && M5.BtnA.isPressed())) {
@@ -980,7 +1174,7 @@ void MPU6886Test_heads_up(bool show_cube) {
             M5.BtnA.releasedFor(BUTTON_RELEASE_ARM_MS)) {
             uint32_t button_a_held_ms =
                 M5.BtnA.lastChange() - button_a_press_started_ms;
-            if (!geometry_toggle_handled &&
+            if (DEVICE_IS_SENSOR_NODE && !geometry_toggle_handled &&
                 button_a_held_ms >= REFERENCE_RESET_HOLD_MS) {
                 theta_reference = theta;
                 phi_reference = phi;
@@ -1017,16 +1211,46 @@ void MPU6886Test_heads_up(bool show_cube) {
             button_b_tracking = false;
         }
 
-        double roll_delta = theta - theta_reference;
-        double pitch_delta = phi - phi_reference;
-        bool inverted =
-            isInvertedFromReference(&current_accel, &reference_accel);
+        double roll_delta = 0;
+        double pitch_delta = 0;
+        bool inverted = false;
+        bool have_attitude_sample = DEVICE_IS_SENSOR_NODE;
+        if (DEVICE_IS_SENSOR_NODE) {
+            roll_delta = theta - theta_reference;
+            pitch_delta = phi - phi_reference;
+            inverted = isInvertedFromReference(&current_accel, &reference_accel);
+            sendImuLinkSample(pitch_delta, roll_delta, inverted);
+        } else if (remoteImuSampleIsFresh(&remote_sample)) {
+            roll_delta = remote_sample.roll_degrees;
+            pitch_delta = remote_sample.pitch_degrees;
+            inverted = remote_sample.inverted;
+            have_attitude_sample = true;
+        }
 
         Disbuff.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                          DISPLAY_BACKGROUND_COLOR);
+        drawDeviceRoleLabel(&Disbuff, DEVICE_IS_SENSOR_NODE);
 
-        if (show_cube) {
-            drawHeadsUpCube(&Disbuff, theta, phi, rect_source);
+        if (!have_attitude_sample) {
+            drawImuLinkWaitingLabel(&Disbuff);
+            // Suppress sounds
+            // updateHeadsUpAlerts(HeadsUpAlertState::Alarm);
+            Displaybuff();
+            M5.update();
+            checkAXPPress();
+            continue;
+        }
+
+        bool draw_cube = show_cube && !ellipse_mode;
+        if (draw_cube && !cube_prepared) {
+            prepareHeadsUpCube(rect_source);
+            cube_prepared = true;
+        }
+        if (draw_cube) {
+            drawHeadsUpCube(&Disbuff,
+                            DEVICE_IS_SENSOR_NODE ? theta : roll_delta,
+                            DEVICE_IS_SENSOR_NODE ? phi : pitch_delta,
+                            rect_source);
         }
         HeadsUpAlertState alert_state =
             drawHeadsUpPlot(&Disbuff, pitch_delta, roll_delta, ellipse_mode,
@@ -1084,8 +1308,8 @@ void setup()
     M5.begin();
     M5.Axp.ScreenBreath(100);    
     Serial.begin(115200);
-
-    Wire.begin(32, 33);
+    ImuLinkSerial.begin(IMU_LINK_BAUD, SERIAL_8N1, IMU_LINK_RX_PIN,
+                        IMU_LINK_TX_PIN);
 
     pinMode(M5_LED, OUTPUT);
     setRedLed(false);
@@ -1101,7 +1325,9 @@ void setup()
                      DISPLAY_BACKGROUND_COLOR);
     Disbuff.pushSprite(0, 0);
 
-    M5.Imu.Init();
+    if (DEVICE_IS_SENSOR_NODE) {
+        M5.Imu.Init();
+    }
 }
 
 void loop() {

@@ -1,7 +1,8 @@
 #include "M5StickCPlus.h"
 
 const bool showCube = true;
-static constexpr bool DEVICE_IS_SENSOR_NODE = true;
+static constexpr bool DEVICE_IS_SENSOR_NODE = false;
+static constexpr bool DEVICE_HAS_RADIO_LINK = true;
 
 typedef struct {
     double x;
@@ -28,15 +29,6 @@ double sin_alpha = sin(19.47 * PI / 180);
 double cos_alpha = cos(19.47 * PI / 180);
 double sin_gamma = sin(20.7 * PI / 180);
 double cos_gamma = cos(20.7 * PI / 180);
-
-extern const unsigned char ImageData[768];
-extern const unsigned char error_48[4608];
-extern const unsigned char icon_ir[4608];
-extern const unsigned char icon_ble[4608];
-extern const unsigned char icon_wifi[4608];
-extern const unsigned char icon_ble_disconnect[4608];
-
-bool TestMode = false;
 
 TFT_eSprite Disbuff = TFT_eSprite(&M5.Lcd);
 
@@ -109,14 +101,21 @@ static constexpr uint16_t SOUND_TOGGLE_OFF_TONES[SOUND_TOGGLE_TONE_COUNT] = {
     1319, 1047, 784};
 static constexpr double INVERSION_DOT_THRESHOLD = 0.0;
 static constexpr uint32_t IMU_LINK_BAUD = 9600;
-static constexpr int8_t IMU_LINK_CONTROLLER_RX_SENSOR_TX_PIN = 32;
-static constexpr int8_t IMU_LINK_CONTROLLER_TX_SENSOR_RX_PIN = 33;
-static constexpr int8_t IMU_LINK_RX_PIN =
-    DEVICE_IS_SENSOR_NODE ? IMU_LINK_CONTROLLER_TX_SENSOR_RX_PIN
-                          : IMU_LINK_CONTROLLER_RX_SENSOR_TX_PIN;
-static constexpr int8_t IMU_LINK_TX_PIN =
-    DEVICE_IS_SENSOR_NODE ? IMU_LINK_CONTROLLER_RX_SENSOR_TX_PIN
-                          : IMU_LINK_CONTROLLER_TX_SENSOR_RX_PIN;
+static constexpr int8_t IMU_LINK_CONTROLLER_TX_PIN = 32;
+static constexpr int8_t IMU_LINK_CONTROLLER_RX_PIN = 33;
+// static constexpr int8_t IMU_LINK_RX_PIN = 33;
+// TX Sensor Yellow 32 --> RXD on radio (with no heatshrink)
+// RX Sensor White 33 --> TXD on radio (with no heatshrink)
+static constexpr int8_t IMU_LINK_RX_PIN = (   // with radio 33 needed no matter what
+            DEVICE_HAS_RADIO_LINK ? 33
+                          : (DEVICE_IS_SENSOR_NODE ? 33 : 32));
+// 
+// RX Sensor Yellow 32 --> TXD on radio
+//static constexpr int8_t IMU_LINK_TX_PIN = 32;
+static constexpr int8_t IMU_LINK_TX_PIN = // with radio 32 needed no matter what;
+(    DEVICE_HAS_RADIO_LINK ? 32
+                          : (DEVICE_IS_SENSOR_NODE ? 32 : 33) );
+
 static constexpr uint8_t IMU_LINK_MAGIC_0 = 0xA5;
 static constexpr uint8_t IMU_LINK_MAGIC_1 = 0x5A;
 static constexpr uint8_t IMU_LINK_VERSION = 1;
@@ -229,12 +228,6 @@ bool checkAXP192() {
 }
 
 void Displaybuff() {
-    if (TestMode) {
-        Disbuff.setTextSize(1);
-        Disbuff.setTextColor(TFT_RED);
-        Disbuff.drawString("Test Mode", 0, 0, 1);
-        Disbuff.setTextColor(TFT_WHITE);
-    }
     Disbuff.pushSprite(0, 0);
 }
 
@@ -413,7 +406,7 @@ void sendImuLinkSample(double pitch_degrees, double roll_degrees,
     static uint32_t last_sent_ms = 0;
     uint32_t now = millis();
     if (sent_once && now - last_sent_ms < IMU_LINK_SEND_INTERVAL_MS) {
-        return;
+//        return;
     }
     sent_once = true;
     last_sent_ms = now;

@@ -3,7 +3,7 @@
 #include <string.h>
 
 const bool showCube = true;
-static constexpr bool DEVICE_IS_SENSOR_NODE = true;
+static constexpr bool DEVICE_IS_SENSOR_NODE = false;
 static constexpr bool DEVICE_HAS_RADIO_LINK = true;
 
 struct CommsConfig
@@ -59,7 +59,7 @@ static constexpr CommsConfig comms_10Hz_1200_water = { // max 10 messages per se
                     .imu_link_timeout_ms=250};
 
 
-static constexpr CommsConfig active_comms_config = comms_10Hz_1200_water;  // was 12_hz_water
+static constexpr CommsConfig active_comms_config = comms_12_Hz_1200_water;
 typedef struct {
     double x;
     double y;
@@ -1318,7 +1318,7 @@ void drawHc12StoredSettingsWarning(TFT_eSprite *display) {
 
     display->setTextSize(2);
     display->setTextColor(TFT_RED);
-    display->drawCentreString("SET Pin", PLOT_CENTER_X,
+    display->drawCentreString("SET GPIO 26", PLOT_CENTER_X,
                               RADIO_SET_PIN_WARNING_Y, 1);
     display->drawCentreString("Needed", PLOT_CENTER_X,
                               RADIO_SET_PIN_WARNING_Y + 16, 1);

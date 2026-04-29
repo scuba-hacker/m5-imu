@@ -1,8 +1,9 @@
 #include "M5StickCPlus.h"
+#include <Preferences.h>
 #include <string.h>
 
 const bool showCube = true;
-static constexpr bool DEVICE_IS_SENSOR_NODE = false;
+static constexpr bool DEVICE_IS_SENSOR_NODE = true;
 static constexpr bool DEVICE_HAS_RADIO_LINK = true;
 
 struct CommsConfig
@@ -58,7 +59,7 @@ static constexpr CommsConfig comms_10Hz_1200_water = { // max 10 messages per se
                     .imu_link_timeout_ms=250};
 
 
-static constexpr CommsConfig active_comms_config = comms_12_Hz_1200_water;
+static constexpr CommsConfig active_comms_config = comms_10Hz_1200_water;  // was 12_hz_water
 typedef struct {
     double x;
     double y;
@@ -129,6 +130,15 @@ static constexpr int16_t SENSOR_MSG_FREQ_COLOUR = TFT_YELLOW;
 static constexpr int16_t BAUD_Y = 105;
 static constexpr int16_t BAUD_X = 129;
 static constexpr int16_t BAUD_COLOUR = TFT_YELLOW;
+static constexpr int16_t RADIO_PREF_WARNING_Y = 126;
+static constexpr int16_t RADIO_SET_PIN_WARNING_Y = 200;
+static constexpr uint16_t RADIO_PREF_WARNING_COLOUR = TFT_YELLOW;
+static constexpr int16_t UART_STATUS_SHIFT_Y = 50;
+static constexpr int16_t UART_STATUS_TITLE_Y =
+    DISPLAY_HEIGHT / 2 - 8 - UART_STATUS_SHIFT_Y;
+static constexpr int16_t UART_STATUS_DIAGNOSTIC_Y =
+    DISPLAY_HEIGHT / 2 + 14 - UART_STATUS_SHIFT_Y;
+static constexpr int16_t UART_MISMATCH_TITLE_OFFSET_Y = 15;
 
 static constexpr int16_t SPOT_LIMIT_LABEL_Y_OFFSET = 8;
 static constexpr int16_t FORWARD_ARROW_LENGTH = 30;
@@ -178,11 +188,16 @@ static constexpr int8_t HC12_SET_GPIO = 26;
 static constexpr bool HC12_CONFIGURE_BAUD_ON_STARTUP = DEVICE_HAS_RADIO_LINK;
 static constexpr bool HC12_AT_DIAGNOSTICS = true;
 static constexpr bool HC12_FORCE_BAUD_SET_ON_STARTUP = false;
+static constexpr uint8_t HC12_CONFIGURED_RADIO_MODE = 3;
+static constexpr char HC12_PREF_NAMESPACE[] = "hc12";
+static constexpr char HC12_PREF_VALID_KEY[] = "valid";
+static constexpr char HC12_PREF_BAUD_KEY[] = "baud";
+static constexpr char HC12_PREF_MODE_KEY[] = "mode";
 static constexpr uint32_t HC12_DIAGNOSTIC_SERIAL_WAIT_MS = 1500;
 static constexpr uint32_t HC12_COMMAND_MODE_ENTER_MS = 50;
 static constexpr uint32_t HC12_COMMAND_MODE_EXIT_MS = 90;
 static constexpr uint32_t HC12_COMMAND_RESPONSE_TIMEOUT_MS = 200;
-static constexpr uint32_t HC12_QUERY_RESPONSE_TIMEOUT_MS = 500;
+static constexpr uint32_t HC12_QUERY_RESPONSE_TIMEOUT_MS = 1000;
 static constexpr uint32_t HC12_SUPPORTED_BAUDS[] = {
     1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
 // static constexpr int8_t IMU_LINK_RX_PIN = 33;
@@ -270,6 +285,14 @@ struct MessageRateTracker {
     uint16_t bucket_count[MESSAGE_RATE_BUCKET_COUNT];
 };
 
+struct Hc12StoredSettings {
+    bool loaded;
+    bool valid;
+    uint32_t baud;
+    uint8_t mode;
+    bool differs_from_compiled;
+};
+
 bool FeedbackBeepActive = false;
 uint32_t FeedbackBeepStartedMs = 0;
 uint32_t FeedbackBeepDurationMs = 0;
@@ -282,6 +305,7 @@ uint32_t SoundToggleTonesStartedMs = 0;
 HardwareSerial ImuLinkSerial(2);
 ImuLinkDiagnostics ImuLinkDiag = {0, 0, 0, 0};
 MessageRateTracker ImuLinkRateTracker = {{0}, {0}};
+Hc12StoredSettings Hc12Settings = {false, false, 0, 0, false};
 
 void drawBaudRate(TFT_eSprite *display, uint32_t baud, uint32_t tx_send_interval_ms);
 
@@ -319,6 +343,103 @@ bool checkAXP192() {
 
 void Displaybuff() {
     Disbuff.pushSprite(0, 0);
+}
+
+void formatHc12Mode(uint8_t mode, char *mode_text, size_t mode_text_size) {
+    snprintf(mode_text, mode_text_size, "FU%u", mode);
+}
+
+void updateHc12StoredSettingsMismatch() {
+    Hc12Settings.differs_from_compiled =
+        Hc12Settings.valid &&
+        (Hc12Settings.baud != active_comms_config.imu_link_baud ||
+         Hc12Settings.mode != HC12_CONFIGURED_RADIO_MODE);
+}
+
+void loadHc12StoredSettings() {
+    Preferences prefs;
+    Hc12Settings.loaded = true;
+    Hc12Settings.valid = false;
+    Hc12Settings.baud = 0;
+    Hc12Settings.mode = 0;
+    Hc12Settings.differs_from_compiled = false;
+
+    if (!prefs.begin(HC12_PREF_NAMESPACE, true)) {
+        Serial.println("HC12 prefs: failed to open namespace");
+        return;
+    }
+
+    Hc12Settings.valid = prefs.getBool(HC12_PREF_VALID_KEY, false);
+    if (Hc12Settings.valid) {
+        Hc12Settings.baud = prefs.getUInt(HC12_PREF_BAUD_KEY, 0);
+        Hc12Settings.mode =
+            prefs.getUChar(HC12_PREF_MODE_KEY, HC12_CONFIGURED_RADIO_MODE);
+    }
+    prefs.end();
+    updateHc12StoredSettingsMismatch();
+
+    if (HC12_AT_DIAGNOSTICS) {
+        char mode_text[8];
+        formatHc12Mode(Hc12Settings.mode, mode_text, sizeof(mode_text));
+        if (Hc12Settings.valid) {
+            Serial.printf("HC12 prefs: last baud=%lu mode=%s differs=%s\r\n",
+                          (unsigned long)Hc12Settings.baud, mode_text,
+                          Hc12Settings.differs_from_compiled ? "yes" : "no");
+        } else {
+            Serial.println("HC12 prefs: no stored radio settings");
+        }
+    }
+}
+
+bool saveHc12StoredSettings(uint32_t baud, uint8_t mode) {
+    if (Hc12Settings.valid && Hc12Settings.baud == baud &&
+        Hc12Settings.mode == mode) {
+        if (HC12_AT_DIAGNOSTICS) {
+            Serial.println("HC12 prefs: stored settings already current");
+        }
+        updateHc12StoredSettingsMismatch();
+        return true;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(HC12_PREF_NAMESPACE, false)) {
+        Serial.println("HC12 prefs: failed to open namespace for write");
+        return false;
+    }
+
+    prefs.putUInt(HC12_PREF_BAUD_KEY, baud);
+    prefs.putUChar(HC12_PREF_MODE_KEY, mode);
+    prefs.putBool(HC12_PREF_VALID_KEY, true);
+    prefs.end();
+
+    Hc12Settings.loaded = true;
+    Hc12Settings.valid = true;
+    Hc12Settings.baud = baud;
+    Hc12Settings.mode = mode;
+    updateHc12StoredSettingsMismatch();
+
+    if (HC12_AT_DIAGNOSTICS) {
+        char mode_text[8];
+        formatHc12Mode(mode, mode_text, sizeof(mode_text));
+        Serial.printf("HC12 prefs: saved baud=%lu mode=%s\r\n",
+                      (unsigned long)baud, mode_text);
+    }
+    return true;
+}
+
+bool parseHc12ModeFromResponse(const char *response, uint8_t *mode) {
+    const char *mode_marker = strstr(response, "OK+FU");
+    if (mode_marker == NULL) {
+        return false;
+    }
+
+    char mode_digit = mode_marker[5];
+    if (mode_digit < '0' || mode_digit > '9') {
+        return false;
+    }
+
+    *mode = mode_digit - '0';
+    return true;
 }
 
 void startupWaitMs(uint32_t wait_ms) {
@@ -411,6 +532,30 @@ bool readHc12Response(char *response, size_t response_size,
     return false;
 }
 
+bool readHc12ResponseWindow(char *response, size_t response_size,
+                            uint32_t timeout_ms) {
+    if (response_size == 0) {
+        return false;
+    }
+
+    size_t response_length = 0;
+    response[0] = '\0';
+    uint32_t started_ms = millis();
+    while (millis() - started_ms < timeout_ms) {
+        while (ImuLinkSerial.available() > 0) {
+            char value = (char)ImuLinkSerial.read();
+            if (response_length + 1 < response_size) {
+                response[response_length++] = value;
+                response[response_length] = '\0';
+            }
+        }
+        M5.update();
+        yield();
+    }
+
+    return response_length > 0;
+}
+
 bool sendHc12Command(const char *command, const char *expected_response) {
     char response[24];
 
@@ -429,7 +574,7 @@ bool sendHc12Command(const char *command, const char *expected_response) {
     return true;
 }
 
-bool queryHc12Settings(uint32_t expected_baud) {
+bool queryHc12Settings(uint32_t expected_baud, uint8_t *confirmed_mode) {
     char response[96];
     char expected_response[16];
 
@@ -444,10 +589,29 @@ bool queryHc12Settings(uint32_t expected_baud) {
     ImuLinkSerial.print("AT+RX");
     ImuLinkSerial.flush();
 
-    if (!readHc12Response(response, sizeof(response), expected_response,
-                          HC12_QUERY_RESPONSE_TIMEOUT_MS)) {
+    if (!readHc12ResponseWindow(response, sizeof(response),
+                                HC12_QUERY_RESPONSE_TIMEOUT_MS)) {
         Serial.println("HC12: AT+RX query failed");
         return false;
+    }
+
+    if (HC12_AT_DIAGNOSTICS) {
+        Serial.printf("HC12 RX: \"%s\"\r\n", response);
+    }
+
+    if (strstr(response, expected_response) == NULL) {
+        Serial.println("HC12: AT+RX query failed");
+        return false;
+    }
+
+    if (!parseHc12ModeFromResponse(response, confirmed_mode)) {
+        *confirmed_mode = HC12_CONFIGURED_RADIO_MODE;
+        if (HC12_AT_DIAGNOSTICS) {
+            char mode_text[8];
+            formatHc12Mode(*confirmed_mode, mode_text, sizeof(mode_text));
+            Serial.printf("HC12: mode not in AT+RX response, assuming %s\r\n",
+                          mode_text);
+        }
     }
 
     Serial.printf("HC12: settings query returned \"%s\"\r\n", response);
@@ -491,6 +655,7 @@ uint32_t findHc12CommandBaud(uint32_t preferred_baud) {
 bool setHc12BaudRate(uint32_t target_baud) {
     char command[16];
     char expected_response[16];
+    uint8_t confirmed_mode = HC12_CONFIGURED_RADIO_MODE;
 
     if (HC12_AT_DIAGNOSTICS) {
         Serial.printf("HC12: configure target baud=%lu\r\n",
@@ -530,7 +695,10 @@ bool setHc12BaudRate(uint32_t target_baud) {
         Serial.println("HC12: baud already matches target");
     }
 
-    queryHc12Settings(target_baud);
+    bool query_success = queryHc12Settings(target_baud, &confirmed_mode);
+    if (query_success) {
+        saveHc12StoredSettings(target_baud, confirmed_mode);
+    }
 
     exitHc12CommandMode();
     beginImuLinkSerial(target_baud);
@@ -538,10 +706,14 @@ bool setHc12BaudRate(uint32_t target_baud) {
         Serial.printf("HC12: normal data mode at %lu baud\r\n",
                       (unsigned long)target_baud);
     }
-    return true;
+    return query_success;
 }
 
 void setupImuLinkSerial() {
+    if (!Hc12Settings.loaded) {
+        loadHc12StoredSettings();
+    }
+
     if (HC12_AT_DIAGNOSTICS) {
         Serial.printf("IMU link setup: radio=%s role=%s configured_baud=%lu\r\n",
                       DEVICE_HAS_RADIO_LINK ? "yes" : "no",
@@ -1124,15 +1296,57 @@ void drawMessageRate(TFT_eSprite *display) {
     display->setTextSize(1);
 }
 
-void drawImuLinkWaitingLabel(TFT_eSprite *display) {
-    char diagnostic_text[40];
+void drawHc12StoredSettingsWarning(TFT_eSprite *display) {
+    if (!Hc12Settings.differs_from_compiled) {
+        return;
+    }
 
-    uint16_t shift_uart_msg_upwards = 50;
+    char stored_mode_text[8];
+    char compiled_mode_text[8];
+    char stored_text[32];
+    char compiled_text[32];
+    formatHc12Mode(Hc12Settings.mode, stored_mode_text,
+                   sizeof(stored_mode_text));
+    formatHc12Mode(HC12_CONFIGURED_RADIO_MODE, compiled_mode_text,
+                   sizeof(compiled_mode_text));
+
+    snprintf(stored_text, sizeof(stored_text), "LAST %lu %s",
+             (unsigned long)Hc12Settings.baud, stored_mode_text);
+    snprintf(compiled_text, sizeof(compiled_text), "CFG %lu %s",
+             (unsigned long)active_comms_config.imu_link_baud,
+             compiled_mode_text);
 
     display->setTextSize(2);
     display->setTextColor(TFT_RED);
-    display->drawCentreString("NO UART", PLOT_CENTER_X,
-                              DISPLAY_HEIGHT / 2 - 8 - shift_uart_msg_upwards, 1);
+    display->drawCentreString("SET Pin", PLOT_CENTER_X,
+                              RADIO_SET_PIN_WARNING_Y, 1);
+    display->drawCentreString("Needed", PLOT_CENTER_X,
+                              RADIO_SET_PIN_WARNING_Y + 16, 1);
+
+    display->setTextSize(1);
+    display->setTextColor(RADIO_PREF_WARNING_COLOUR);
+    display->drawCentreString(stored_text, PLOT_CENTER_X,
+                              RADIO_PREF_WARNING_Y, 1);
+    display->drawCentreString(compiled_text, PLOT_CENTER_X,
+                              RADIO_PREF_WARNING_Y + 10, 1);
+}
+
+void drawImuLinkWaitingLabel(TFT_eSprite *display, bool uart_mismatch) {
+    char diagnostic_text[40];
+
+    display->setTextSize(2);
+    display->setTextColor(TFT_RED);
+    if (uart_mismatch) {
+        display->drawCentreString(
+            "UART", PLOT_CENTER_X,
+            UART_STATUS_TITLE_Y - UART_MISMATCH_TITLE_OFFSET_Y, 1);
+        display->drawCentreString(
+            "MISMATCH", PLOT_CENTER_X,
+            UART_STATUS_TITLE_Y - UART_MISMATCH_TITLE_OFFSET_Y + 16, 1);
+    } else {
+        display->drawCentreString("NO UART", PLOT_CENTER_X,
+                                  UART_STATUS_TITLE_Y, 1);
+    }
     if (SHOW_IMU_LINK_DIAGNOSTICS) {
         snprintf(diagnostic_text, sizeof(diagnostic_text), "B%lu F%lu C%lu V%lu",
                  (unsigned long)ImuLinkDiag.bytes_received,
@@ -1142,10 +1356,11 @@ void drawImuLinkWaitingLabel(TFT_eSprite *display) {
         display->setTextSize(1);
         display->setTextColor(TFT_WHITE);
         display->drawCentreString(diagnostic_text, PLOT_CENTER_X,
-                                  DISPLAY_HEIGHT / 2 + 14 - shift_uart_msg_upwards, 1);
+                                  UART_STATUS_DIAGNOSTIC_Y, 1);
     }
 
     drawBaudRate(display, active_comms_config.imu_link_baud, active_comms_config.imu_link_send_interval_ms);
+    drawHc12StoredSettingsWarning(display);
 
     display->setTextSize(1);
 }
@@ -1709,8 +1924,19 @@ void MPU6886Test_heads_up(bool show_cube) {
                          DISPLAY_BACKGROUND_COLOR);
         drawDeviceRoleLabel(&Disbuff, DEVICE_IS_SENSOR_NODE);
 
+        if (DEVICE_IS_SENSOR_NODE && Hc12Settings.differs_from_compiled) {
+            drawImuLinkWaitingLabel(&Disbuff, true);
+            Displaybuff();
+            last_theta = theta;
+            last_phi = phi;
+            M5.update();
+            checkAXPPress();
+            continue;
+        }
+
         if (!have_attitude_sample) {
-            drawImuLinkWaitingLabel(&Disbuff);
+            drawImuLinkWaitingLabel(&Disbuff,
+                                    Hc12Settings.differs_from_compiled);
             // Suppress sounds
             // updateHeadsUpAlerts(HeadsUpAlertState::Alarm);
             Displaybuff();

@@ -121,6 +121,22 @@ of and back into AT command mode before querying settings with `AT+RX`; this is
 needed because the HC-12 may not answer the query immediately after `AT+B...`
 without a command-mode cycle.
 
+After a successful HC-12 AT/query exchange, the firmware stores the last
+confirmed radio settings in ESP32 Preferences under the `hc12` namespace:
+
+- `baud`: last confirmed HC-12 UART baud.
+- `mode`: last confirmed/assumed HC-12 FU mode. This is currently `FU3` because
+  mode-changing is not implemented yet, but the storage is ready for it.
+- `valid`: whether the stored values are meaningful.
+
+If the `SET` pin is not wired or AT mode cannot be reached, the firmware cannot
+change or query the module. In that case it compares the compiled settings with
+the last confirmed values from flash. If the values differ, the HUD diverts to a
+UART mismatch warning screen in either sensor-node or display-controller mode.
+The title is shown as two lines, `UART` and `MISMATCH`, and the screen shows
+`LAST <baud> FUx` and `CFG <baud> FUx` so the user can spot a likely radio
+configuration mismatch.
+
 The existing USB `Serial` object is still available for local debug messages, but
 it is not used for the IMU data link.
 
@@ -154,9 +170,10 @@ The receiver parser is non-blocking and consumes all available UART bytes each
 HUD frame. It uses the magic bytes to resynchronise after dropped or noisy data.
 If no valid frame is received for
 `active_comms_config.imu_link_timeout_ms`, the display controller shows
-`NO UART`. The current loop suppresses alert sounds while waiting for the link.
-When `SHOW_IMU_LINK_DIAGNOSTICS` is enabled, the error screen also shows byte,
-valid frame, checksum error, and version error counters.
+`NO UART`, or `UART` / `MISMATCH` when stored radio settings disagree with the
+compiled settings. The current loop suppresses alert sounds while waiting for
+the link. When `SHOW_IMU_LINK_DIAGNOSTICS` is enabled, the error screen also
+shows byte, valid frame, checksum error, and version error counters.
 
 ## Controls
 
@@ -386,7 +403,15 @@ Important functions and responsibilities:
     module UART baud to match `active_comms_config.imu_link_baud`.
   - Query the module with `AT+RX` and expect the returned baud, for example
     `OK+B115200`, before entering normal data mode.
+  - Store the last confirmed baud and FU mode in ESP32 Preferences.
   - Re-open `ImuLinkSerial` at the final data baud before the HUD loop starts.
+
+- `loadHc12StoredSettings()`, `saveHc12StoredSettings()`
+  - Read/write the `hc12` Preferences namespace in flash.
+  - Detect when the compiled baud or FU mode differs from the last confirmed
+    radio settings.
+  - Feed the UART mismatch warning screen when AT mode could not correct/query
+    the module.
 
 - `readRemoteImuSample()`
   - Non-blocking UART receive/parser loop.

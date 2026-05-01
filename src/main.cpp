@@ -3,7 +3,7 @@
 #include <string.h>
 
 const bool showCube = true;
-static constexpr bool DEVICE_IS_SENSOR_NODE = false;
+static constexpr bool DEVICE_IS_SENSOR_NODE = true;
 static constexpr bool DEVICE_HAS_RADIO_LINK = true;
 
 struct CommsConfig
@@ -104,6 +104,7 @@ static constexpr int16_t ELLIPSE_PLOT_RADIUS_X = DISPLAY_WIDTH / 2;
 static constexpr int16_t ELLIPSE_PLOT_RADIUS_Y =
     (DISPLAY_HEIGHT - ELLIPSE_TOP_OFFSET) / 2;
 static constexpr bool START_IN_ELLIPSE_MODE = true;
+static constexpr bool USE_VECTOR_RELATIVE_LEVEL = true;
 static constexpr int16_t SPOT_RADIUS = 10;
 static constexpr int16_t LEVEL_SPOT_RADIUS = 20;
 static constexpr int16_t PLOT_LINE_WIDTH = 3;
@@ -161,8 +162,34 @@ static constexpr uint16_t TFT_DARK_RED_70 = 0x4800;
 static constexpr uint16_t TFT_DARK_ORANGE_70 = 0x49C0;
 
 static constexpr double DEGREES_PER_RADIAN = 57.29577951308232;
+static constexpr double ACCEL_VECTOR_MIN_LENGTH = 0.05;
+static constexpr double ACCEL_TANGENT_BASIS_MIN_LENGTH = 0.000001;
 static constexpr uint16_t ALARM_BUZZER_FREQUENCY = 2000;
 static constexpr uint32_t ALERT_TOGGLE_MS = 250;
+static constexpr uint8_t SCREEN_BRIGHTNESS_HIGH = 100;
+static constexpr uint8_t SCREEN_BRIGHTNESS_LOW = 1;
+static constexpr uint8_t AXP_SHORT_PRESS_MASK = 0x02;
+static constexpr uint32_t SCREEN_CURRENT_OVERLAY_MS = 1000;
+static constexpr int16_t SCREEN_CURRENT_OVERLAY_X = 5;
+static constexpr int16_t SCREEN_CURRENT_OVERLAY_Y = 86;
+static constexpr int16_t SCREEN_CURRENT_OVERLAY_WIDTH =
+    DISPLAY_WIDTH - (SCREEN_CURRENT_OVERLAY_X * 2);
+static constexpr int16_t SCREEN_CURRENT_OVERLAY_HEIGHT = 68;
+static constexpr uint32_t BATTERY_CURRENT_AVERAGE_WINDOW_MS = 10000;
+static constexpr uint16_t BATTERY_CURRENT_HISTORY_CAPACITY = 1024;
+static constexpr uint32_t REFERENCE_RESET_COUNTDOWN_MS = 20000;
+static constexpr uint32_t REFERENCE_RESET_COUNTDOWN_BUTTON_IGNORE_MS = 1000;
+static constexpr uint32_t REFERENCE_RESET_COUNTDOWN_INTERRUPT_SETTLE_MS = 1000;
+static constexpr int16_t REFERENCE_RESET_COUNTDOWN_X = 5;
+static constexpr int16_t REFERENCE_RESET_COUNTDOWN_Y = 42;
+static constexpr int16_t REFERENCE_RESET_COUNTDOWN_WIDTH =
+    DISPLAY_WIDTH - (REFERENCE_RESET_COUNTDOWN_X * 2);
+static constexpr int16_t REFERENCE_RESET_COUNTDOWN_HEIGHT = 138;
+static constexpr int16_t REMOTE_LEVELING_BANNER_X = 5;
+static constexpr int16_t REMOTE_LEVELING_BANNER_Y = 42;
+static constexpr int16_t REMOTE_LEVELING_BANNER_WIDTH =
+    DISPLAY_WIDTH - (REMOTE_LEVELING_BANNER_X * 2);
+static constexpr int16_t REMOTE_LEVELING_BANNER_HEIGHT = 30;
 static constexpr uint32_t LEVEL_LED_PULSE_INTERVAL_MS = 3000;
 static constexpr uint32_t LEVEL_LED_PULSE_MS = 5;
 static constexpr uint32_t ALARM_SPOT_FLASH_TICK_MS = 150;
@@ -177,6 +204,7 @@ static constexpr uint32_t LIMIT_CYCLE_BEEP_MS = 100;
 static constexpr uint32_t SOUND_TOGGLE_HOLD_MS = 1000;
 static constexpr uint32_t SOUND_TOGGLE_TONE_MS = 100;
 static constexpr uint8_t SOUND_TOGGLE_TONE_COUNT = 3;
+static constexpr bool DEFAULT_SOUND_ENABLED = !DEVICE_IS_SENSOR_NODE;
 static constexpr uint16_t SOUND_TOGGLE_ON_TONES[SOUND_TOGGLE_TONE_COUNT] = {
     784, 1047, 1319};
 static constexpr uint16_t SOUND_TOGGLE_OFF_TONES[SOUND_TOGGLE_TONE_COUNT] = {
@@ -217,6 +245,7 @@ static constexpr uint8_t IMU_LINK_MAGIC_0 = 0xA5;
 static constexpr uint8_t IMU_LINK_MAGIC_1 = 0x5A;
 static constexpr uint8_t IMU_LINK_VERSION = 1;
 static constexpr uint8_t IMU_LINK_FLAG_INVERTED = 0x01;
+static constexpr uint8_t IMU_LINK_FLAG_REFERENCE_RESET_COUNTDOWN = 0x02;
 static constexpr uint8_t IMU_LINK_VERSION_SHIFT = 4;
 static constexpr uint8_t IMU_LINK_FRAME_BYTES = 8;
 static constexpr bool SHOW_IMU_LINK_DIAGNOSTICS = true;
@@ -269,6 +298,7 @@ struct RemoteImuSample {
     double pitch_degrees;
     double roll_degrees;
     bool inverted;
+    bool reference_reset_countdown_active;
     bool valid;
     uint32_t received_ms;
 };
@@ -296,11 +326,28 @@ struct Hc12StoredSettings {
 bool FeedbackBeepActive = false;
 uint32_t FeedbackBeepStartedMs = 0;
 uint32_t FeedbackBeepDurationMs = 0;
-bool SoundEnabled = true;
+bool SoundEnabled = DEFAULT_SOUND_ENABLED;
 bool SoundToggleTonesActive = false;
 const uint16_t *SoundToggleTones = NULL;
 uint8_t SoundToggleToneIndex = 0;
 uint32_t SoundToggleTonesStartedMs = 0;
+bool ScreenBrightnessHigh = true;
+bool ScreenCurrentOverlayActive = false;
+bool ScreenBrightnessChangePending = false;
+bool ScreenPendingBrightnessHigh = true;
+float ScreenCurrentOverlayMilliamps = 0.0f;
+bool ScreenCurrentOverlayBatteryCharging = false;
+uint32_t ScreenCurrentOverlayStartedMs = 0;
+float BatteryCurrentSamples[BATTERY_CURRENT_HISTORY_CAPACITY] = {0.0f};
+uint32_t BatteryCurrentSampleTimesMs[BATTERY_CURRENT_HISTORY_CAPACITY] = {0};
+uint16_t BatteryCurrentSampleStart = 0;
+uint16_t BatteryCurrentSampleCount = 0;
+bool ReferenceResetCountdownActive = false;
+uint32_t ReferenceResetCountdownStartedMs = 0;
+bool ReferenceResetCountdownInterruptPending = false;
+bool ReferenceResetCountdownInterruptReleased = false;
+uint32_t ReferenceResetCountdownInterruptReleasedMs = 0;
+bool RemoteReferenceResetCountdownActive = false;
 
 HardwareSerial ImuLinkSerial(2);
 ImuLinkDiagnostics ImuLinkDiag = {0, 0, 0, 0};
@@ -321,13 +368,368 @@ void IRAM_ATTR onTimer() {
     portEXIT_CRITICAL_ISR(&timerMux);
 }
 
+void applyScreenBrightness(bool high) {
+    ScreenBrightnessHigh = high;
+    if (high) {
+        M5.Axp.SetLDO2(true);
+        M5.Axp.ScreenBreath(SCREEN_BRIGHTNESS_HIGH);
+    } else {
+        M5.Axp.ScreenBreath(SCREEN_BRIGHTNESS_LOW);
+        M5.Axp.SetLDO2(false);
+    }
+}
+
+float getBatteryCurrentMilliamps() {
+    return M5.Axp.GetBatCurrent();
+}
+
+float absoluteMilliamps(float milliamps) {
+    return milliamps < 0.0f ? -milliamps : milliamps;
+}
+
+uint16_t batteryCurrentSampleIndex(uint16_t offset) {
+    return (BatteryCurrentSampleStart + offset) %
+           BATTERY_CURRENT_HISTORY_CAPACITY;
+}
+
+void dropOldestBatteryCurrentSample() {
+    if (BatteryCurrentSampleCount == 0) {
+        return;
+    }
+
+    BatteryCurrentSampleStart =
+        (BatteryCurrentSampleStart + 1) % BATTERY_CURRENT_HISTORY_CAPACITY;
+    BatteryCurrentSampleCount--;
+}
+
+void pruneBatteryCurrentHistory(uint32_t now_ms) {
+    while (BatteryCurrentSampleCount > 1) {
+        uint16_t second_sample = batteryCurrentSampleIndex(1);
+        if (now_ms - BatteryCurrentSampleTimesMs[second_sample] <
+            BATTERY_CURRENT_AVERAGE_WINDOW_MS) {
+            break;
+        }
+        dropOldestBatteryCurrentSample();
+    }
+}
+
+void updateBatteryCurrentAverage() {
+    uint32_t now_ms = millis();
+    float current_ma = getBatteryCurrentMilliamps();
+
+    if (BatteryCurrentSampleCount > 0) {
+        uint16_t latest_sample =
+            batteryCurrentSampleIndex(BatteryCurrentSampleCount - 1);
+        if (BatteryCurrentSampleTimesMs[latest_sample] == now_ms) {
+            BatteryCurrentSamples[latest_sample] = current_ma;
+            pruneBatteryCurrentHistory(now_ms);
+            return;
+        }
+    }
+
+    if (BatteryCurrentSampleCount >= BATTERY_CURRENT_HISTORY_CAPACITY) {
+        dropOldestBatteryCurrentSample();
+    }
+
+    uint16_t sample_index = batteryCurrentSampleIndex(BatteryCurrentSampleCount);
+    BatteryCurrentSamples[sample_index] = current_ma;
+    BatteryCurrentSampleTimesMs[sample_index] = now_ms;
+    BatteryCurrentSampleCount++;
+    pruneBatteryCurrentHistory(now_ms);
+}
+
+float getBatteryCurrentAverageMilliamps() {
+    if (BatteryCurrentSampleCount == 0) {
+        updateBatteryCurrentAverage();
+    }
+
+    if (BatteryCurrentSampleCount == 0) {
+        return 0.0f;
+    }
+
+    uint32_t now_ms = millis();
+    pruneBatteryCurrentHistory(now_ms);
+
+    if (BatteryCurrentSampleCount == 1) {
+        return BatteryCurrentSamples[BatteryCurrentSampleStart];
+    }
+
+    double weighted_total = 0.0;
+    uint32_t covered_ms = 0;
+    for (uint16_t offset = 0; offset < BatteryCurrentSampleCount; offset++) {
+        uint16_t sample_index = batteryCurrentSampleIndex(offset);
+        uint32_t sample_time_ms =
+            BatteryCurrentSampleTimesMs[sample_index];
+        uint32_t segment_end_ms = now_ms;
+        if (offset + 1 < BatteryCurrentSampleCount) {
+            uint16_t next_sample = batteryCurrentSampleIndex(offset + 1);
+            segment_end_ms = BatteryCurrentSampleTimesMs[next_sample];
+        }
+
+        if (now_ms - segment_end_ms >= BATTERY_CURRENT_AVERAGE_WINDOW_MS) {
+            continue;
+        }
+
+        uint32_t segment_start_ms = sample_time_ms;
+        if (now_ms - segment_start_ms > BATTERY_CURRENT_AVERAGE_WINDOW_MS) {
+            segment_start_ms = now_ms - BATTERY_CURRENT_AVERAGE_WINDOW_MS;
+        }
+
+        if (segment_end_ms <= segment_start_ms) {
+            continue;
+        }
+
+        uint32_t segment_ms = segment_end_ms - segment_start_ms;
+        weighted_total += BatteryCurrentSamples[sample_index] * segment_ms;
+        covered_ms += segment_ms;
+    }
+
+    if (covered_ms == 0) {
+        uint16_t latest_sample =
+            batteryCurrentSampleIndex(BatteryCurrentSampleCount - 1);
+        return BatteryCurrentSamples[latest_sample];
+    }
+
+    return weighted_total / covered_ms;
+}
+
+void startScreenBrightnessToggle() {
+    if (ScreenCurrentOverlayActive) {
+        return;
+    }
+
+    bool next_brightness_high = !ScreenBrightnessHigh;
+    updateBatteryCurrentAverage();
+    float average_current_ma = getBatteryCurrentAverageMilliamps();
+    ScreenCurrentOverlayBatteryCharging = average_current_ma > 0.0f;
+    ScreenCurrentOverlayMilliamps = absoluteMilliamps(average_current_ma);
+    ScreenCurrentOverlayStartedMs = millis();
+    ScreenCurrentOverlayActive = true;
+
+    if (next_brightness_high) {
+        applyScreenBrightness(next_brightness_high);
+        ScreenBrightnessChangePending = false;
+    } else {
+        ScreenPendingBrightnessHigh = next_brightness_high;
+        ScreenBrightnessChangePending = true;
+    }
+}
+
+void updateScreenCurrentOverlay() {
+    if (!ScreenCurrentOverlayActive) {
+        return;
+    }
+
+    if (millis() - ScreenCurrentOverlayStartedMs < SCREEN_CURRENT_OVERLAY_MS) {
+        return;
+    }
+
+    ScreenCurrentOverlayActive = false;
+    if (ScreenBrightnessChangePending) {
+        applyScreenBrightness(ScreenPendingBrightnessHigh);
+        ScreenBrightnessChangePending = false;
+    }
+}
+
+void drawScreenCurrentOverlay(TFT_eSprite *display) {
+    if (!ScreenCurrentOverlayActive) {
+        return;
+    }
+
+    char current_text[24];
+    snprintf(current_text, sizeof(current_text), "%.1f mA",
+             ScreenCurrentOverlayMilliamps);
+
+    display->fillRect(SCREEN_CURRENT_OVERLAY_X, SCREEN_CURRENT_OVERLAY_Y,
+                      SCREEN_CURRENT_OVERLAY_WIDTH,
+                      SCREEN_CURRENT_OVERLAY_HEIGHT, TFT_BLACK);
+    display->drawRect(SCREEN_CURRENT_OVERLAY_X, SCREEN_CURRENT_OVERLAY_Y,
+                      SCREEN_CURRENT_OVERLAY_WIDTH,
+                      SCREEN_CURRENT_OVERLAY_HEIGHT, TFT_YELLOW);
+    display->setTextSize(1);
+    display->setTextColor(TFT_WHITE, TFT_BLACK);
+    display->drawCentreString("10S AVG", DISPLAY_WIDTH / 2,
+                              SCREEN_CURRENT_OVERLAY_Y + 5, 2);
+    display->setTextSize(2);
+    display->setTextColor(TFT_YELLOW, TFT_BLACK);
+    display->drawCentreString(current_text, DISPLAY_WIDTH / 2,
+                              SCREEN_CURRENT_OVERLAY_Y + 23, 2);
+    if (ScreenCurrentOverlayBatteryCharging) {
+        display->setTextSize(2);
+        display->setTextColor(TFT_RED, TFT_BLACK);
+        display->drawCentreString("CHARGING", DISPLAY_WIDTH / 2,
+                                  SCREEN_CURRENT_OVERLAY_Y + 55, 1);
+    }
+}
+
+void startReferenceResetCountdown() {
+    ReferenceResetCountdownActive = true;
+    ReferenceResetCountdownStartedMs = millis();
+    ReferenceResetCountdownInterruptPending = false;
+    ReferenceResetCountdownInterruptReleased = false;
+    ReferenceResetCountdownInterruptReleasedMs = 0;
+    FeedbackBeepActive = false;
+    SoundToggleTonesActive = false;
+    M5.Beep.mute();
+}
+
+bool soundsTemporarilyDisabled() {
+    return ReferenceResetCountdownActive || RemoteReferenceResetCountdownActive;
+}
+
+void enforceTemporarySoundMute() {
+    if (!soundsTemporarilyDisabled()) {
+        return;
+    }
+
+    FeedbackBeepActive = false;
+    SoundToggleTonesActive = false;
+    M5.Beep.mute();
+}
+
+bool referenceResetCountdownComplete() {
+    return ReferenceResetCountdownActive &&
+           millis() - ReferenceResetCountdownStartedMs >=
+               REFERENCE_RESET_COUNTDOWN_MS;
+}
+
+bool referenceResetCountdownButtonArmed() {
+    return ReferenceResetCountdownActive &&
+           millis() - ReferenceResetCountdownStartedMs >=
+               REFERENCE_RESET_COUNTDOWN_BUTTON_IGNORE_MS;
+}
+
+void requestReferenceResetCountdownInterrupt() {
+    if (ReferenceResetCountdownInterruptPending) {
+        return;
+    }
+
+    ReferenceResetCountdownInterruptPending = true;
+    ReferenceResetCountdownInterruptReleased = false;
+    ReferenceResetCountdownInterruptReleasedMs = 0;
+}
+
+void updateReferenceResetCountdownInterrupt(bool button_a_pressed) {
+    if (!ReferenceResetCountdownInterruptPending ||
+        ReferenceResetCountdownInterruptReleased) {
+        return;
+    }
+
+    if (!button_a_pressed) {
+        ReferenceResetCountdownInterruptReleased = true;
+        ReferenceResetCountdownInterruptReleasedMs = millis();
+    }
+}
+
+bool referenceResetCountdownInterruptComplete() {
+    return ReferenceResetCountdownInterruptPending &&
+           ReferenceResetCountdownInterruptReleased &&
+           millis() - ReferenceResetCountdownInterruptReleasedMs >=
+               REFERENCE_RESET_COUNTDOWN_INTERRUPT_SETTLE_MS;
+}
+
+bool referenceResetCountdownReadyToSample() {
+    if (!ReferenceResetCountdownActive) {
+        return false;
+    }
+
+    if (ReferenceResetCountdownInterruptPending) {
+        return referenceResetCountdownInterruptComplete();
+    }
+
+    return referenceResetCountdownComplete();
+}
+
+void finishReferenceResetCountdown() {
+    ReferenceResetCountdownActive = false;
+    ReferenceResetCountdownInterruptPending = false;
+    ReferenceResetCountdownInterruptReleased = false;
+    ReferenceResetCountdownInterruptReleasedMs = 0;
+}
+
+uint8_t referenceResetCountdownSecondsRemaining() {
+    if (!ReferenceResetCountdownActive) {
+        return 0;
+    }
+
+    if (ReferenceResetCountdownInterruptPending &&
+        ReferenceResetCountdownInterruptReleased) {
+        uint32_t elapsed_ms =
+            millis() - ReferenceResetCountdownInterruptReleasedMs;
+        if (elapsed_ms >= REFERENCE_RESET_COUNTDOWN_INTERRUPT_SETTLE_MS) {
+            return 0;
+        }
+
+        uint32_t remaining_ms =
+            REFERENCE_RESET_COUNTDOWN_INTERRUPT_SETTLE_MS - elapsed_ms;
+        return (remaining_ms + 999) / 1000;
+    }
+
+    uint32_t elapsed_ms = millis() - ReferenceResetCountdownStartedMs;
+    if (elapsed_ms >= REFERENCE_RESET_COUNTDOWN_MS) {
+        return 0;
+    }
+
+    uint32_t remaining_ms = REFERENCE_RESET_COUNTDOWN_MS - elapsed_ms;
+    return (remaining_ms + 999) / 1000;
+}
+
+void drawReferenceResetCountdownOverlay(TFT_eSprite *display) {
+    if (!ReferenceResetCountdownActive) {
+        return;
+    }
+    enforceTemporarySoundMute();
+
+    char countdown_text[4];
+    snprintf(countdown_text, sizeof(countdown_text), "%u",
+             referenceResetCountdownSecondsRemaining());
+
+    display->fillRect(REFERENCE_RESET_COUNTDOWN_X,
+                      REFERENCE_RESET_COUNTDOWN_Y,
+                      REFERENCE_RESET_COUNTDOWN_WIDTH,
+                      REFERENCE_RESET_COUNTDOWN_HEIGHT, TFT_BLACK);
+    display->drawRect(REFERENCE_RESET_COUNTDOWN_X,
+                      REFERENCE_RESET_COUNTDOWN_Y,
+                      REFERENCE_RESET_COUNTDOWN_WIDTH,
+                      REFERENCE_RESET_COUNTDOWN_HEIGHT, TFT_CYAN);
+    display->setTextSize(2);
+    display->setTextColor(TFT_WHITE, TFT_BLACK);
+    display->drawCentreString("RESET IN", DISPLAY_WIDTH / 2,
+                              REFERENCE_RESET_COUNTDOWN_Y + 10, 1);
+    display->setFreeFont(&Orbitron_Light_32);
+    display->setTextSize(2);
+    display->setTextColor(TFT_CYAN, TFT_BLACK);
+    display->drawCentreString(countdown_text, DISPLAY_WIDTH / 2,
+                              REFERENCE_RESET_COUNTDOWN_Y + 35, 1);
+    display->setFreeFont(NULL);
+    display->setTextSize(1);
+    display->setTextColor(TFT_YELLOW, TFT_BLACK);
+    display->drawCentreString("SOUND MUTED", DISPLAY_WIDTH / 2,
+                              REFERENCE_RESET_COUNTDOWN_Y + 118, 1);
+}
+
+void drawRemoteLevelingBanner(TFT_eSprite *display) {
+    if (!RemoteReferenceResetCountdownActive) {
+        return;
+    }
+
+    display->fillRect(REMOTE_LEVELING_BANNER_X, REMOTE_LEVELING_BANNER_Y,
+                      REMOTE_LEVELING_BANNER_WIDTH,
+                      REMOTE_LEVELING_BANNER_HEIGHT, TFT_BLACK);
+    display->drawRect(REMOTE_LEVELING_BANNER_X, REMOTE_LEVELING_BANNER_Y,
+                      REMOTE_LEVELING_BANNER_WIDTH,
+                      REMOTE_LEVELING_BANNER_HEIGHT, TFT_CYAN);
+    display->setTextSize(2);
+    display->setTextColor(TFT_CYAN, TFT_BLACK);
+    display->drawCentreString("Levelling", DISPLAY_WIDTH / 2,
+                              REMOTE_LEVELING_BANNER_Y + 7, 1);
+}
+
 void checkAXPPress() {
-    if (M5.Axp.GetBtnPress()) {
-        do {
-            M5.update();
-        } while (M5.Axp.GetBtnPress());
-        M5.Beep.mute();
-        ESP.restart();
+    updateBatteryCurrentAverage();
+    uint8_t axp_press = M5.Axp.GetBtnPress();
+    if (axp_press & AXP_SHORT_PRESS_MASK) {
+        startScreenBrightnessToggle();
     }
 }
 
@@ -342,6 +744,12 @@ bool checkAXP192() {
 }
 
 void Displaybuff() {
+    updateBatteryCurrentAverage();
+    updateScreenCurrentOverlay();
+    enforceTemporarySoundMute();
+    drawScreenCurrentOverlay(&Disbuff);
+    drawReferenceResetCountdownOverlay(&Disbuff);
+    drawRemoteLevelingBanner(&Disbuff);
     Disbuff.pushSprite(0, 0);
 }
 
@@ -795,6 +1203,12 @@ void cycleHeadsUpLimits() {
 
 void startSoundToggleTones(bool sound_enabled) {
     FeedbackBeepActive = false;
+    if (soundsTemporarilyDisabled()) {
+        SoundToggleTonesActive = false;
+        M5.Beep.mute();
+        return;
+    }
+
     SoundToggleTonesActive = true;
     SoundToggleTones = sound_enabled ? SOUND_TOGGLE_ON_TONES
                                      : SOUND_TOGGLE_OFF_TONES;
@@ -810,6 +1224,12 @@ void toggleSoundEnabled() {
 
 bool updateSoundToggleTones(uint32_t now) {
     if (!SoundToggleTonesActive) {
+        return false;
+    }
+
+    if (soundsTemporarilyDisabled()) {
+        SoundToggleTonesActive = false;
+        M5.Beep.mute();
         return false;
     }
 
@@ -829,7 +1249,8 @@ bool updateSoundToggleTones(uint32_t now) {
 }
 
 void startFeedbackBeep(uint16_t frequency, uint32_t duration_ms) {
-    if (!SoundEnabled || SoundToggleTonesActive) {
+    if (!SoundEnabled || soundsTemporarilyDisabled() ||
+        SoundToggleTonesActive) {
         return;
     }
 
@@ -844,7 +1265,7 @@ bool updateFeedbackBeep(uint32_t now) {
         return false;
     }
 
-    if (!SoundEnabled) {
+    if (!SoundEnabled || soundsTemporarilyDisabled()) {
         FeedbackBeepActive = false;
         M5.Beep.mute();
         return false;
@@ -967,7 +1388,8 @@ uint8_t imuLinkChecksum(uint8_t *frame) {
 }
 
 void sendImuLinkSample(double pitch_degrees, double roll_degrees,
-                       bool inverted) {
+                       bool inverted,
+                       bool reference_reset_countdown_active) {
     static bool schedule_started = false;
     static uint32_t next_send_due_ms = 0;
     uint32_t now = millis();
@@ -993,8 +1415,14 @@ void sendImuLinkSample(double pitch_degrees, double roll_degrees,
 
     frame[0] = IMU_LINK_MAGIC_0;
     frame[1] = IMU_LINK_MAGIC_1;
-    frame[2] = (IMU_LINK_VERSION << IMU_LINK_VERSION_SHIFT) |
-               (inverted ? IMU_LINK_FLAG_INVERTED : 0);
+    uint8_t flags = 0;
+    if (inverted) {
+        flags |= IMU_LINK_FLAG_INVERTED;
+    }
+    if (reference_reset_countdown_active) {
+        flags |= IMU_LINK_FLAG_REFERENCE_RESET_COUNTDOWN;
+    }
+    frame[2] = (IMU_LINK_VERSION << IMU_LINK_VERSION_SHIFT) | flags;
     writeInt16LE(frame, 3, degreesToCentidegrees(pitch_degrees));
     writeInt16LE(frame, 5, degreesToCentidegrees(roll_degrees));
     frame[7] = imuLinkChecksum(frame);
@@ -1027,6 +1455,8 @@ bool decodeImuLinkFrame(uint8_t *frame, RemoteImuSample *sample) {
     sample->pitch_degrees = readInt16LE(frame, 3) / 100.0;
     sample->roll_degrees = readInt16LE(frame, 5) / 100.0;
     sample->inverted = (frame[2] & IMU_LINK_FLAG_INVERTED) != 0;
+    sample->reference_reset_countdown_active =
+        (frame[2] & IMU_LINK_FLAG_REFERENCE_RESET_COUNTDOWN) != 0;
     sample->received_ms = millis();
     sample->valid = true;
     ImuLinkDiag.frames_received++;
@@ -1084,7 +1514,7 @@ void printImuLinkRuntimeDiagnostics(RemoteImuSample *sample,
     last_printed_ms = now;
 
     Serial.printf(
-        "Controller RX: bytes=%lu frames=%lu rate=%.1f/s checksum=%lu version=%lu fresh=%s pitch=%.1f roll=%.1f inverted=%d\r\n",
+        "Controller RX: bytes=%lu frames=%lu rate=%.1f/s checksum=%lu version=%lu fresh=%s pitch=%.1f roll=%.1f inverted=%d reset_countdown=%d\r\n",
         (unsigned long)ImuLinkDiag.bytes_received,
         (unsigned long)ImuLinkDiag.frames_received,
         averageMessageRatePerSecond(),
@@ -1093,7 +1523,8 @@ void printImuLinkRuntimeDiagnostics(RemoteImuSample *sample,
         have_attitude_sample ? "yes" : "no",
         sample->pitch_degrees,
         sample->roll_degrees,
-        sample->inverted ? 1 : 0);
+        sample->inverted ? 1 : 0,
+        sample->reference_reset_countdown_active ? 1 : 0);
 }
 
 void readTiltSample(double *theta, double *phi, AccelVector *accel) {
@@ -1135,6 +1566,93 @@ bool isInvertedFromReference(AccelVector *current, AccelVector *reference) {
     return accelDotProduct(current, reference) < INVERSION_DOT_THRESHOLD;
 }
 
+double accelVectorLength(AccelVector *value) {
+    return sqrt((value->x * value->x) + (value->y * value->y) +
+                (value->z * value->z));
+}
+
+bool normalizeAccelVector(AccelVector *source, AccelVector *normalized) {
+    double length = accelVectorLength(source);
+    if (length < ACCEL_VECTOR_MIN_LENGTH) {
+        return false;
+    }
+
+    normalized->x = source->x / length;
+    normalized->y = source->y / length;
+    normalized->z = source->z / length;
+    return true;
+}
+
+double accelVectorDot(AccelVector *a, AccelVector *b) {
+    return (a->x * b->x) + (a->y * b->y) + (a->z * b->z);
+}
+
+AccelVector accelVectorCross(AccelVector *a, AccelVector *b) {
+    return {
+        .x = (a->y * b->z) - (a->z * b->y),
+        .y = (a->z * b->x) - (a->x * b->z),
+        .z = (a->x * b->y) - (a->y * b->x),
+    };
+}
+
+bool projectAxisOntoReferenceTangent(AccelVector *axis,
+                                     AccelVector *reference_unit,
+                                     AccelVector *basis_unit) {
+    double axis_reference_dot = accelVectorDot(axis, reference_unit);
+    AccelVector projected = {
+        .x = axis->x - (reference_unit->x * axis_reference_dot),
+        .y = axis->y - (reference_unit->y * axis_reference_dot),
+        .z = axis->z - (reference_unit->z * axis_reference_dot),
+    };
+    double projected_length = accelVectorLength(&projected);
+    if (projected_length < ACCEL_TANGENT_BASIS_MIN_LENGTH) {
+        return false;
+    }
+
+    basis_unit->x = projected.x / projected_length;
+    basis_unit->y = projected.y / projected_length;
+    basis_unit->z = projected.z / projected_length;
+    return true;
+}
+
+bool calculateVectorRelativeLevelDelta(AccelVector *current,
+                                       AccelVector *reference,
+                                       double *pitch_degrees,
+                                       double *roll_degrees) {
+    AccelVector current_unit;
+    AccelVector reference_unit;
+    if (!normalizeAccelVector(current, &current_unit) ||
+        !normalizeAccelVector(reference, &reference_unit)) {
+        return false;
+    }
+
+    AccelVector roll_axis = {.x = -1.0, .y = 0.0, .z = 0.0};
+    AccelVector roll_basis;
+    if (!projectAxisOntoReferenceTangent(&roll_axis, &reference_unit,
+                                         &roll_basis)) {
+        roll_axis = {.x = 0.0, .y = 1.0, .z = 0.0};
+        if (!projectAxisOntoReferenceTangent(&roll_axis, &reference_unit,
+                                             &roll_basis)) {
+            return false;
+        }
+    }
+
+    AccelVector pitch_basis = accelVectorCross(&roll_basis, &reference_unit);
+    if (!normalizeAccelVector(&pitch_basis, &pitch_basis)) {
+        return false;
+    }
+
+    double reference_alignment =
+        clampDouble(accelVectorDot(&current_unit, &reference_unit), -1.0, 1.0);
+    *roll_degrees = atan2(accelVectorDot(&current_unit, &roll_basis),
+                          reference_alignment) *
+                    DEGREES_PER_RADIAN;
+    *pitch_degrees = atan2(accelVectorDot(&current_unit, &pitch_basis),
+                           reference_alignment) *
+                     DEGREES_PER_RADIAN;
+    return true;
+}
+
 HeadsUpAlertState getHeadsUpAlertState(double pitch_degrees,
                                        double roll_degrees,
                                        HeadsUpLimitConfig *limits,
@@ -1163,9 +1681,25 @@ void updateHeadsUpAlerts(HeadsUpAlertState alert_state) {
     static bool level_pulse_active = false;
     uint32_t now = millis();
     bool alert_phase_on = ((now / ALERT_TOGGLE_MS) % 2) == 0;
+    if (soundsTemporarilyDisabled()) {
+        enforceTemporarySoundMute();
+        if (alert_state == HeadsUpAlertState::Alarm) {
+            level_pulse_active = false;
+            setRedLed(true);
+            return;
+        }
+    }
+
     bool sound_toggle_tones_active = updateSoundToggleTones(now);
     bool feedback_beep_active =
         sound_toggle_tones_active ? false : updateFeedbackBeep(now);
+    bool sounds_muted = soundsTemporarilyDisabled();
+
+    if (sounds_muted) {
+        M5.Beep.mute();
+        sound_toggle_tones_active = false;
+        feedback_beep_active = false;
+    }
 
     if (alert_state == HeadsUpAlertState::Alarm) {
         level_pulse_active = false;
@@ -1173,7 +1707,7 @@ void updateHeadsUpAlerts(HeadsUpAlertState alert_state) {
         if (sound_toggle_tones_active || feedback_beep_active) {
             return;
         }
-        if (!SoundEnabled) {
+        if (!SoundEnabled || sounds_muted) {
             M5.Beep.mute();
             return;
         }
@@ -1817,10 +2351,12 @@ void MPU6886Test_heads_up(bool show_cube) {
     double phi = 0, last_phi = 0;
     double alpha = 0.2;
     AccelVector reference_accel = {0, 0, 1};
-    RemoteImuSample remote_sample = {0, 0, false, false, 0};
+    AccelVector filtered_accel = reference_accel;
+    RemoteImuSample remote_sample = {0, 0, false, false, false, 0};
 
     if (DEVICE_IS_SENSOR_NODE) {
         readTiltSample(&theta_reference, &phi_reference, &reference_accel);
+        filtered_accel = reference_accel;
         theta = last_theta = theta_reference;
         phi = last_phi = phi_reference;
     }
@@ -1839,42 +2375,69 @@ void MPU6886Test_heads_up(bool show_cube) {
     while (true) {
         double raw_theta = 0;
         double raw_phi = 0;
-        AccelVector current_accel = {0, 0, 1};
+        AccelVector raw_accel = filtered_accel;
+        AccelVector current_accel = filtered_accel;
         if (DEVICE_IS_SENSOR_NODE) {
-            readTiltSample(&raw_theta, &raw_phi, &current_accel);
+            readTiltSample(&raw_theta, &raw_phi, &raw_accel);
 
             theta = alpha * raw_theta + (1 - alpha) * last_theta;
             phi   = alpha * raw_phi + (1 - alpha) * last_phi;
+            filtered_accel.x =
+                alpha * raw_accel.x + (1 - alpha) * filtered_accel.x;
+            filtered_accel.y =
+                alpha * raw_accel.y + (1 - alpha) * filtered_accel.y;
+            filtered_accel.z =
+                alpha * raw_accel.z + (1 - alpha) * filtered_accel.z;
+            current_accel = filtered_accel;
         } else {
             readRemoteImuSample(&remote_sample);
         }
-
-        if (M5.BtnA.wasPressed() ||
-            (!button_a_tracking && M5.BtnA.isPressed())) {
-            button_a_tracking = true;
-            geometry_toggle_handled = false;
-            button_a_press_started_ms = M5.BtnA.lastChange();
+        bool remote_sample_fresh = remoteImuSampleIsFresh(&remote_sample);
+        RemoteReferenceResetCountdownActive =
+            !DEVICE_IS_SENSOR_NODE && remote_sample_fresh &&
+            remote_sample.reference_reset_countdown_active;
+        if (RemoteReferenceResetCountdownActive) {
+            enforceTemporarySoundMute();
         }
 
-        if (button_a_tracking && !geometry_toggle_handled &&
-            M5.BtnA.pressedFor(GEOMETRY_TOGGLE_HOLD_MS)) {
-            ellipse_mode = !ellipse_mode;
-            geometry_toggle_handled = true;
-        }
-
-        if (button_a_tracking &&
-            M5.BtnA.releasedFor(BUTTON_RELEASE_ARM_MS)) {
-            uint32_t button_a_held_ms =
-                M5.BtnA.lastChange() - button_a_press_started_ms;
-            if (DEVICE_IS_SENSOR_NODE && !geometry_toggle_handled &&
-                button_a_held_ms >= REFERENCE_RESET_HOLD_MS) {
-                theta_reference = theta;
-                phi_reference = phi;
-                reference_accel = current_accel;
-                startFeedbackBeep(REFERENCE_RESET_BEEP_FREQUENCY,
-                                  REFERENCE_RESET_BEEP_MS);
-            }
+        bool suppress_button_a_gestures =
+            DEVICE_IS_SENSOR_NODE && ReferenceResetCountdownActive;
+        if (suppress_button_a_gestures) {
             button_a_tracking = false;
+            geometry_toggle_handled = false;
+            bool button_a_pressed = M5.BtnA.isPressed();
+            if (!ReferenceResetCountdownInterruptPending &&
+                referenceResetCountdownButtonArmed() && button_a_pressed) {
+                requestReferenceResetCountdownInterrupt();
+                button_a_tracking = true;
+                geometry_toggle_handled = true;
+                button_a_press_started_ms = M5.BtnA.lastChange();
+            }
+            updateReferenceResetCountdownInterrupt(button_a_pressed);
+        } else {
+            if (M5.BtnA.wasPressed() ||
+                (!button_a_tracking && M5.BtnA.isPressed())) {
+                button_a_tracking = true;
+                geometry_toggle_handled = false;
+                button_a_press_started_ms = M5.BtnA.lastChange();
+            }
+
+            if (button_a_tracking && !geometry_toggle_handled &&
+                M5.BtnA.pressedFor(GEOMETRY_TOGGLE_HOLD_MS)) {
+                ellipse_mode = !ellipse_mode;
+                geometry_toggle_handled = true;
+            }
+
+            if (button_a_tracking &&
+                M5.BtnA.releasedFor(BUTTON_RELEASE_ARM_MS)) {
+                uint32_t button_a_held_ms =
+                    M5.BtnA.lastChange() - button_a_press_started_ms;
+                if (DEVICE_IS_SENSOR_NODE && !geometry_toggle_handled &&
+                    button_a_held_ms >= REFERENCE_RESET_HOLD_MS) {
+                    startReferenceResetCountdown();
+                }
+                button_a_tracking = false;
+            }
         }
 
         if (M5.BtnB.wasPressed() ||
@@ -1903,16 +2466,34 @@ void MPU6886Test_heads_up(bool show_cube) {
             button_b_tracking = false;
         }
 
+        if (DEVICE_IS_SENSOR_NODE && referenceResetCountdownReadyToSample()) {
+            theta_reference = theta;
+            phi_reference = phi;
+            reference_accel = current_accel;
+            finishReferenceResetCountdown();
+            startFeedbackBeep(REFERENCE_RESET_BEEP_FREQUENCY,
+                              REFERENCE_RESET_BEEP_MS);
+        }
+
         double roll_delta = 0;
         double pitch_delta = 0;
         bool inverted = false;
         bool have_attitude_sample = DEVICE_IS_SENSOR_NODE;
         if (DEVICE_IS_SENSOR_NODE) {
-            roll_delta = theta - theta_reference;
-            pitch_delta = phi - phi_reference;
+            bool vector_delta_calculated =
+                USE_VECTOR_RELATIVE_LEVEL &&
+                calculateVectorRelativeLevelDelta(&current_accel,
+                                                  &reference_accel,
+                                                  &pitch_delta,
+                                                  &roll_delta);
+            if (!vector_delta_calculated) {
+                roll_delta = theta - theta_reference;
+                pitch_delta = phi - phi_reference;
+            }
             inverted = isInvertedFromReference(&current_accel, &reference_accel);
-            sendImuLinkSample(pitch_delta, roll_delta, inverted);
-        } else if (remoteImuSampleIsFresh(&remote_sample)) {
+            sendImuLinkSample(pitch_delta, roll_delta, inverted,
+                              ReferenceResetCountdownActive);
+        } else if (remote_sample_fresh) {
             roll_delta = remote_sample.roll_degrees;
             pitch_delta = remote_sample.pitch_degrees;
             inverted = remote_sample.inverted;
@@ -2011,7 +2592,8 @@ int checkI2CAddr() {
 void setup() 
 {
     M5.begin();
-    M5.Axp.ScreenBreath(100);    
+    applyScreenBrightness(true);
+    updateBatteryCurrentAverage();
     Serial.begin(115200);
     if (HC12_AT_DIAGNOSTICS) {
         startupWaitMs(HC12_DIAGNOSTIC_SERIAL_WAIT_MS);

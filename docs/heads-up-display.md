@@ -12,7 +12,8 @@ states.
 ## Goals
 
 - Show roll and pitch in a compact, readable instrument-style UI.
-- Preserve the rotating cube as an optional reference view.
+- Preserve the rotating cube from the original factory application for the M5
+  Stick C Plus as an optional reference view.
 - Support a two-device controller/sensor arrangement where the display controller
   receives attitude data from a remote sensor node over UART.
 - Make the lower plot feel like an 8-bit attitude gauge: stark geometry,
@@ -20,19 +21,33 @@ states.
 - Keep the HUD loop responsive. All user input, LED pulses, buzzer patterns,
   alarm flashing, and sound toggle tones are asynchronous and based on
   `millis()`.
-- Treat startup, or a Button A reference reset, as the nominal level attitude.
+- Treat startup, or the end of a delayed Button A reference reset countdown, as
+  the nominal level attitude.
 
 ## Hardware And Display Setup
 
 - Target device: M5StickC Plus.
 - Display orientation: portrait, `135 x 240`.
 - Sprite buffer: `TFT_eSprite Disbuff`, pushed using `Displaybuff()`.
-- Screen brightness is currently set in `setup()` with:
+- Screen brightness is set in `setup()` through `applyScreenBrightness(true)`.
+  This turns on the LCD backlight rail (`LDO2`) and sets brightness to `100`.
 
 ```cpp
-M5.Axp.ScreenBreath(100);
+applyScreenBrightness(true);
 ```
 
+- A short press of the power button toggles the
+  display between:
+  - high brightness: `SCREEN_BRIGHTNESS_HIGH`, currently `100`, with `LDO2`
+    enabled.
+  - low/off brightness: `SCREEN_BRIGHTNESS_LOW`, currently `1`, then `LDO2`
+    disabled. 
+- Before the brightness changes, the HUD latches and displays a one-second
+  overlay showing the current 10-second rolling battery-current average. The
+  average is maintained from timestamped AXP battery-current samples, with no
+  artificial sample interval. If the signed average indicates charging, the
+  overlay adds a red `CHARGING` label so USB-powered tests are not confused with
+  battery-discharge readings.
 - The HUD clears each frame with `DISPLAY_BACKGROUND_COLOR`, currently
   `TFT_NAVY`.
 - `showCube` controls whether the cube reference may be drawn in circle mode. It
@@ -70,10 +85,15 @@ monitored.
 
 - Reads the local IMU.
 - Owns the reference attitude used as "level to earth".
-- Button A short hold/release resets that reference on the sensor node.
-- Sends referenced pitch, referenced roll, and inverted state over UART.
+- Button A short hold/release starts a 20-second reference-reset countdown on
+  the sensor node. The actual reference is sampled only when the countdown
+  completes.
+- Sends referenced pitch, referenced roll, inverted state, and reference-reset
+  countdown state over UART.
 - Still draws the local HUD, drives its own LED/buzzer, and responds to all
   local buttons.
+- Starts with sound disabled by default, so local alarm tones are off unless
+  Button B long-hold is used to enable sound.
 - Shows `S` as its static role marker.
 
 ### Display Controller
@@ -83,8 +103,14 @@ Set `DEVICE_IS_SENSOR_NODE` to `false` for the display device.
 - Does not read the local IMU in the HUD loop.
 - Receives referenced pitch, referenced roll, and inverted state from the sensor
   node.
+- Mutes its own alarm sound while fresh sensor frames report that the remote
+  reference-reset countdown is active. This lets the sensor be repositioned
+  during the countdown without the controller sounding an intentional alarm.
+- Shows a `Levelling` banner while fresh sensor frames report that
+  the remote reference-reset countdown is active.
 - Drives the display, LED, buzzer, alarm logic, limit cycling, sound toggle, and
   circle/ellipse mode locally.
+- Starts with sound enabled by default.
 - Button A short hold/release does not reset attitude on the controller because
   the reference lives on the sensor node.
 - Button A long hold still toggles circle/ellipse mode.
@@ -150,7 +176,7 @@ floating-point text over the UART link.
 | ---: | --- | --- |
 | `0` | Magic 0 | `0xA5` |
 | `1` | Magic 1 | `0x5A` |
-| `2` | Version and flags | upper nibble = version, bit `0` = inverted |
+| `2` | Version and flags | upper nibble = version, bit `0` = inverted, bit `1` = reference-reset countdown active |
 | `3..4` | Pitch | signed int16, little-endian centidegrees |
 | `5..6` | Roll | signed int16, little-endian centidegrees |
 | `7` | Checksum | uint8 sum of bytes `0..6` |
@@ -173,18 +199,35 @@ If no valid frame is received for
 `NO UART`, or `UART` / `MISMATCH` when stored radio settings disagree with the
 compiled settings. The current loop suppresses alert sounds while waiting for
 the link. When `SHOW_IMU_LINK_DIAGNOSTICS` is enabled, the error screen also
-shows byte, valid frame, checksum error, and version error counters.
+shows byte, valid frame, checksum error, version error, and remote
+reset-countdown state.
+
+The frame size and protocol version did not change when the countdown flag was
+added; it reuses spare capacity in the existing flags byte. Both devices still
+need firmware containing the flag support if the controller is expected to mute
+while the sensor countdown is active.
 
 ## Controls
 
 ### Button A
 
 - Hold then release for at least `100 ms`:
-  - In sensor-node mode, resets the reference attitude to the current filtered
-    pitch and roll.
-  - In sensor-node mode, updates the inversion reference accelerometer vector.
-  - In sensor-node mode, plays a `500 Hz` feedback beep for `1000 ms`, if sound
-    is enabled.
+  - In sensor-node mode, starts a 20-second reference-reset countdown.
+  - During the countdown, the sensor shows a large `RESET IN` overlay using the
+    bundled `Orbitron_Light_32` font for the number.
+  - During the countdown, local sensor sounds are muted. The sensor also sends a
+    UART flag so the controller can mute its alarm sound while fresh countdown
+    frames are arriving and show a `Levelling` banner.
+  - When the countdown completes, the reference attitude is sampled from the
+    current filtered IMU state. This gives the user time to press the button and
+    then position the sensor on the back of a cylinder before the measurement is
+    made.
+  - After the first `1000 ms` of the countdown, pressing Button A again requests
+    an early finish. The sensor waits until Button A is released, then waits a
+    further `1000 ms` before sampling the current filtered IMU state.
+  - At countdown completion, the inversion reference accelerometer vector is
+    updated and a `500 Hz` feedback beep plays for `1000 ms`, if sound is
+    enabled.
   - In display-controller mode, this gesture is ignored because the reference is
     determined by the remote sensor node.
 
@@ -208,8 +251,14 @@ shows byte, valid frame, checksum error, and version error counters.
 
 ### AXP Button
 
-`checkAXPPress()` watches the AXP button and restarts the ESP32 when pressed and
-released.
+`checkAXPPress()` watches the AXP/power button. A short press toggles screen
+brightness instead of rebooting:
+
+- Before the brightness change, the current 10-second rolling battery-current
+  average is shown in a one-second overlay.
+- Toggling to bright enables `LDO2` and sets brightness to `100`.
+- Toggling to low/off sets brightness to `0` and disables `LDO2`. This LDO2-off
+  behavior is currently for current-consumption comparison.
 
 ## Limit States
 
@@ -307,7 +356,8 @@ Implementation outline:
 
 - `readTiltSample()` reads pitch, roll, and an `AccelVector`.
 - Startup stores the initial `AccelVector` as the inversion reference.
-- Button A reference reset also updates this inversion reference.
+- Button A reference reset updates this inversion reference when the 20-second
+  countdown completes.
 - `isInvertedFromReference()` computes a normalized dot product between the
   current and reference acceleration vectors.
 - If the dot product is below `INVERSION_DOT_THRESHOLD`, currently `0.0`, the
@@ -320,9 +370,41 @@ Inverted alarm spots are hollow:
 - The centre is filled black using `HOLLOW_SPOT_RING_WIDTH`.
 - The warning-limit text is not drawn inside hollow inverted spots.
 
+## Relative Level Math
+
+The legacy level calculation converts accelerometer readings into two
+Euler-style angles and subtracts the saved reference angles:
+
+```cpp
+roll_delta = theta - theta_reference;
+pitch_delta = phi - phi_reference;
+```
+
+That path remains available as the fallback.
+
+The feature flag below enables the newer vector-relative calculation:
+
+```cpp
+static constexpr bool USE_VECTOR_RELATIVE_LEVEL = false;
+```
+
+When enabled, `calculateVectorRelativeLevelDelta()` compares the current
+filtered acceleration vector directly with the saved reference acceleration
+vector. This avoids the `atan(accY / accZ)` singularity that can occur when the
+sensor is referenced at or near a 90-degree side orientation, where `accZ` can be
+close to zero.
+
+The vector-relative path uses the same low-pass smoothing input as the legacy
+path. `MPU6886Test_heads_up()` maintains a filtered `AccelVector` alongside the
+filtered `theta` and `phi` values, using the same `alpha = 0.2`. Reference resets
+store that filtered vector when the countdown completes.
+
+If vector normalization fails or the reference tangent basis cannot be built,
+the firmware falls back to the legacy angle subtraction for that frame.
+
 ## Return Arrow
 
-Alarm state can draw a magenta arrow protruding from the large alarm spot.
+Alarm state draws a magenta arrow protruding from the large alarm spot.
 Dimensions are configurable:
 
 - `RED_SPOT_RETURN_ARROW_LENGTH`
@@ -368,12 +450,21 @@ LED.
 - The buzzer alternates `2000 Hz` on/off at a `250 ms` cadence, unless:
   - sound is disabled,
   - a feedback beep is active,
-  - or the sound toggle flourish is active.
+  - the sound toggle flourish is active,
+  - the local sensor reference-reset countdown is active,
+  - or the controller is receiving fresh frames that report the sensor
+    reference-reset countdown is active.
 
 ### Sound Toggle
 
 `SoundEnabled` gates normal beeps. The sound toggle flourish itself is allowed
 to play so the user gets confirmation when sound is disabled or re-enabled.
+The startup default is role-based: disabled on the sensor node and enabled on
+the display controller.
+
+Reference-reset countdown muting does not change `SoundEnabled`. It is a
+temporary suppression state used so the sensor can be repositioned while it is
+intentionally far from the current reference.
 
 ## Implementation Map
 
@@ -390,8 +481,8 @@ Important functions and responsibilities:
     then pushes the sprite.
 
 - `sendImuLinkSample()`
-  - Packs referenced pitch, referenced roll, and inverted flag into the 8-byte
-    UART frame format.
+  - Packs referenced pitch, referenced roll, inverted flag, and
+    reference-reset countdown flag into the 8-byte UART frame format.
   - Throttles transmission using a fixed schedule based on
     `active_comms_config.imu_link_send_interval_ms`.
   - Skips a frame instead of blocking if the UART TX buffer cannot accept a full
@@ -416,6 +507,8 @@ Important functions and responsibilities:
 - `readRemoteImuSample()`
   - Non-blocking UART receive/parser loop.
   - Keeps the newest valid sample in `RemoteImuSample`.
+  - Decodes the remote reference-reset countdown flag so the controller can mute
+    its own alarm during the sensor countdown.
 
 - `remoteImuSampleIsFresh()`
   - Rejects stale remote samples after
@@ -430,6 +523,12 @@ Important functions and responsibilities:
   - Reads accelerometer data.
   - Computes pitch/roll angles.
   - Optionally returns the raw acceleration vector for inversion detection.
+
+- `calculateVectorRelativeLevelDelta()`
+  - Optional feature-flagged replacement for subtracting reference Euler angles.
+  - Compares the current filtered acceleration vector against the saved filtered
+    reference vector.
+  - Falls back to the legacy angle path if it cannot produce a stable basis.
 
 - `getHeadsUpAlertState()`
   - Converts pitch/roll/inversion into `Level`, `Warning`, or `Alarm`.
@@ -450,6 +549,17 @@ Important functions and responsibilities:
 - `updateHeadsUpAlerts()`
   - Drives LED and buzzer state asynchronously.
   - Gives precedence to sound toggle tones and feedback beeps over alarm tones.
+  - Suppresses buzzer output while a local or remote reference-reset countdown
+    is active.
+
+- `startReferenceResetCountdown()`, `drawReferenceResetCountdownOverlay()`,
+  `drawRemoteLevelingBanner()`, `referenceResetCountdownComplete()`
+  - Manage the 20-second delayed sensor reference reset.
+  - Allow Button A to request early countdown completion after the first
+    `1000 ms`, then wait for release plus a `1000 ms` settle period.
+  - Draw the large sensor countdown overlay and the controller `Levelling`
+    banner for fresh remote countdown frames.
+  - Temporarily mute sound during the countdown.
 
 - `startFeedbackBeep()`, `updateFeedbackBeep()`
   - Handle one-shot feedback tones for Button A and Button B short actions.
@@ -476,6 +586,9 @@ Important conventions:
 - Long-press actions should be separated from short-press actions so the short
   action is not triggered while reaching the long-press threshold.
 - Audio patterns should be sequenced asynchronously, not with blocking sleeps.
+- Reference-reset countdown timing must remain non-blocking; the HUD keeps
+  drawing, sending/receiving UART frames, and updating LEDs while waiting for
+  the countdown to complete.
 
 ## Design Notes
 
@@ -612,7 +725,7 @@ link continuously at saturation.
   - cube visible/hidden.
 - Add a small sound-off indicator on screen.
 - Add a small geometry-mode indicator on screen.
-- Add a battery indicator and brightness control.
+- Add a persistent battery indicator and brightness setting.
 - Add a startup splash or self-test screen styled like an old vector display.
 - Add a simulator mode that feeds synthetic pitch/roll/inversion data into
   `drawHeadsUpPlot()` for desktop screenshots or unit tests.
@@ -621,7 +734,7 @@ link continuously at saturation.
 - Add a simple role splash screen so it is obvious whether a flashed unit is a
   display controller or sensor node.
 - Consider sending raw accelerometer vectors as an optional second frame type if
-  future controller-side diagnostics need more than the inverted flag.
+  future controller-side diagnostics need more than the current status flags.
 - Split the sketch into modules:
   - IMU/reference handling,
   - button gesture handling,
